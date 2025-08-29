@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Virtual Gallery</title>
 
-  <!-- Pannellum CSS & JS (CDN) -->
+  <!-- Pannellum CSS & JS -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css">
   <script src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js"></script>
 
@@ -15,9 +15,9 @@
     header { padding: 10px 14px; background: #12151a; border-bottom: 1px solid #1e2230; display: flex; gap: 12px; align-items: center; }
     header h1 { font-size: 16px; font-weight: 600; margin: 0; letter-spacing: .3px; }
     header .hint { opacity: .75; font-size: 13px; }
-
-    /* Viewer fills the viewport below the header */
     #panoc { height: calc(100vh - 48px); position: relative; }
+
+    /* Safety sizing if CDN CSS is slow */
     .pnlm-container { position: relative; overflow: hidden; }
     .pnlm-render-container, .pnlm-render-canvas { width: 100%; height: 100%; display: block; }
 
@@ -87,98 +87,49 @@
   <div id="toast" class="toast"></div>
 
   <script>
-    /* ===== Paths (relative to repo root) ===== */
-    const PANORAMA_URL   = "gallery/gallery001.png"; // e.g. repo/gallery/gallery001.png
-    const ART_IMAGE_BASE = "artwork/";               // e.g. repo/artwork/001.png
-    const ART_IMAGE_EXT  = ".png";
-    const ZERO_PAD       = 3;
+    /* ===== Your repo (NO placeholders) ===== */
+    const GH_USER = "lukeo25";
+    const GH_REPO = "gallery";
 
-    /* Auto-discover numbered files (001..ART_MAX_INDEX) */
-    const ART_MAX_INDEX = 500;
-    const CONCURRENCY   = 16;
+    /* Pano uses a raw absolute URL so it never 404s due to relative paths */
+    const PANORAMA_URL = "https://raw.githubusercontent.com/lukeo25/gallery/refs/heads/main/gallery/gallery001.png";
 
-    /* Optional Google Sheet CSV to enrich metadata (leave empty to skip) */
-    const SHEET_CSV_URL = ""; // publish-to-web CSV link if you have one
+    /* We will list artwork via GitHub API, so no base path guessing needed */
+    const GITHUB_CONTENTS_API = `https://api.github.com/repos/${GH_USER}/${GH_REPO}/contents/artwork`;
 
     /* Layout */
     const LAYOUT = { rows: 1, pitchTopDeg: 3, pitchRowGapDeg: -12, yawOffsetDeg: 0 };
 
-    /* ===== Helpers ===== */
+    /* Helpers */
     function el(q){ return document.querySelector(q); }
-    function zeroPad(n,w){ const s=String(n); return s.length>=w ? s : "0".repeat(w-w>s?0:w-s.length)+s; } // safe pad
-    function zeroPad(n,w){ const s=String(n); return s.length>=w ? s : "0".repeat(w - s.length) + s; }    // (final)
     function toast(msg,ms=2600){ const t=el('#toast'); t.textContent=msg; t.style.display='block'; clearTimeout(toast._h); toast._h=setTimeout(()=>t.style.display='none',ms); }
     function escapeHtml(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
-    function parseCSV(text){
-      const rows=[]; let i=0, field='', row=[], q=false;
-      while(i<text.length){ const c=text[i++]; if(q){ if(c==='\"'){ if(text[i]==='\"'){ field+='\"'; i++; } else { q=false; } } else { field+=c; } }
-      else { if(c==='\"'){ q=true; } else if(c===','){ row.push(field); field=''; } else if(c==='\n'||c==='\r'){ if(field!==''||row.length){ row.push(field); rows.push(row); row=[]; field=''; } } else { field+=c; } } }
-      if(field!==''||row.length){ row.push(field); rows.push(row); }
-      const head=rows.shift().map(h=>h.trim());
-      return rows.filter(r=>r.length && r.some(v=>String(v).trim()!==''))
-                 .map(r=>Object.fromEntries(head.map((h,idx)=>[h,(r[idx]||'').trim()])));
+    function numFromFilename(name){
+      // expect '001.png', '023.jpg', etc.
+      const m = /^(\d+)\.(png|jpg|jpeg|webp)$/i.exec(name);
+      return m ? parseInt(m[1], 10) : null;
     }
 
-    async function fetchCSVMap(){
-      if(!SHEET_CSV_URL) return new Map();
-      try{
-        const res = await fetch(SHEET_CSV_URL, { cache:'no-store' });
-        if(!res.ok) throw new Error('CSV ' + res.status);
-        const rows = parseCSV(await res.text());
-        const map = new Map();
-        for(const r of rows){ const num = parseInt(r.number,10); if(Number.isFinite(num)) map.set(num, r); }
-        return map;
-      }catch(e){ console.warn('CSV load failed:', e); return new Map(); }
-    }
+    async function fetchArtworkList(){
+      // Get folder listing from GitHub API (CORS allowed, rate limit ~60/hr unauthenticated)
+      const res = await fetch(GITHUB_CONTENTS_API, { cache: 'no-store' });
+      if(!res.ok) throw new Error("GitHub API error " + res.status);
+      const files = await res.json();
 
-    function resolveImageURL(fileName){
-      if(/^https?:\/\//i.test(fileName)) return fileName;
-      const base = ART_IMAGE_BASE.endsWith('/') ? ART_IMAGE_BASE : ART_IMAGE_BASE + '/';
-      return base + fileName.replace(/^\/*/,'');
-    }
+      // Keep only numbered image files and sort by number
+      const items = files
+        .filter(f => f.type === "file" && /\.(png|jpg|jpeg|webp)$/i.test(f.name))
+        .map(f => ({ number: numFromFilename(f.name), name: f.name, url: f.download_url }))
+        .filter(x => Number.isFinite(x.number))
+        .sort((a,b) => a.number - b.number)
+        .map(x => ({
+          number: String(x.number),
+          title:  "", artist: "", year: "", medium: "", dimensions: "", price: "", description: "",
+          imageUrl: x.url
+        }));
 
-    async function exists(url){
-      try{ const res = await fetch(url, { method:'HEAD', cache:'no-store' }); return res.ok; }
-      catch{ return false; }
-    }
-
-    async function discoverArtworkNumbers(){
-      const nums = Array.from({length: ART_MAX_INDEX}, (_,i)=>i+1);
-      const found = [];
-      let idx = 0;
-      async function worker(){
-        while(idx < nums.length){
-          const n = nums[idx++];
-          const url = resolveImageURL(zeroPad(n, ZERO_PAD) + ART_IMAGE_EXT);
-          if(await exists(url)) found.push(n);
-        }
-      }
-      await Promise.all(Array.from({length: CONCURRENCY}, worker));
-      found.sort((a,b)=>a-b);
-      return found;
-    }
-
-    async function loadArtData(){
-      const csvMap = await fetchCSVMap();
-      const numbers = await discoverArtworkNumbers();
-      return numbers.map(n => {
-        const meta = csvMap.get(n) || {};
-        const imageUrl = meta.image && meta.image.trim()
-          ? resolveImageURL(meta.image.trim())
-          : resolveImageURL(zeroPad(n, ZERO_PAD) + ART_IMAGE_EXT);
-        return {
-          number: String(n),
-          title:  meta.title || '',
-          artist: meta.artist || '',
-          year:   meta.year || '',
-          medium: meta.medium || '',
-          dimensions: meta.dimensions || '',
-          price:  meta.price || '',
-          description: meta.description || '',
-          imageUrl
-        };
-      });
+      return items;
     }
 
     function positionForIndex(i,total){
@@ -193,7 +144,7 @@
       return { yaw, pitch };
     }
 
-    let viewer = null, loadTimer = null;
+    let viewer = null;
 
     function initPano(){
       if(viewer){ try{ viewer.destroy(); }catch{} }
@@ -208,17 +159,16 @@
 
       viewer.on('error', e => { console.error('Pannellum error:', e); toast('Error loading panorama'); });
 
-      clearTimeout(loadTimer);
-      loadTimer = setTimeout(() => {
-        toast('Still loading… check gallery/gallery001.png path');
-        console.warn('Timeout: pano likely not reachable at', PANORAMA_URL);
-      }, 9000);
-
       viewer.on('load', async () => {
-        clearTimeout(loadTimer);
-        const items = await loadArtData();
-        addArtHotspots(items);
-        toast(`${items.length} artworks loaded`);
+        try{
+          const items = await fetchArtworkList();
+          if(items.length === 0) toast("No images found in /artwork");
+          addArtHotspots(items);
+          toast(`${items.length} artworks loaded`);
+        }catch(err){
+          console.error(err);
+          toast("Couldn't list /artwork via GitHub API");
+        }
       });
     }
 
