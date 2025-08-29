@@ -10,7 +10,7 @@
   <script src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js"></script>
 
   <style>
-    html, body { height: 100%; margin: 0; background: #0b0d10; color: #e7ecf2; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    html, body { height: 100%; margin: 0; background: #0b0d10; color: #e7ecf2; font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; }
     #app { display: grid; grid-template-rows: auto 1fr; height: 100%; }
     header { padding: 10px 14px; background: #12151a; border-bottom: 1px solid #1e2230; display: flex; gap: 12px; align-items: center; }
     header h1 { font-size: 16px; font-weight: 600; margin: 0; letter-spacing: .3px; }
@@ -20,15 +20,11 @@
     .pnlm-container { position: relative; overflow: hidden; }
     .pnlm-render-container, .pnlm-render-canvas { width: 100%; height: 100%; display: block; }
 
-    /* Wrapper we rotate for fake perspective */
-    .art-wrap {
-      transform-origin: center center;
-      will-change: transform;
-    }
+    /* Wrapper we rotate to fake perspective */
+    .art-wrap { transform-origin: center center; will-change: transform; }
 
-    /* The tile (billboard). Size is set dynamically per image. */
+    /* Billboard itself (size applied per-image in JS) */
     .art-slot {
-      /* width/height are set in JS after we know image ratio */
       border: 4px solid rgba(255,255,255,.9);
       box-shadow: 0 6px 20px rgba(0,0,0,.45), inset 0 0 0 1px rgba(0,0,0,.25);
       border-radius: 6px;
@@ -36,14 +32,13 @@
       background-position: center;
       background-repeat: no-repeat;
       cursor: pointer;
-
-      /* Fade in once placed & sized. No transform transition (prevents “slide-in”). */
-      opacity: 0;
+      opacity: 0;                           /* fade in only after positioned & sized */
       transition: opacity .22s ease, box-shadow .15s ease;
     }
     .art-slot.ready { opacity: 1; }
     .art-slot:hover { box-shadow: 0 10px 24px rgba(0,0,0,.6), inset 0 0 0 1px rgba(0,0,0,.25); }
 
+    /* small number badge (can remove if you don’t want it) */
     .art-slot::after {
       content: attr(data-artno);
       position: absolute; right: -10px; top: -10px; width: 28px; height: 28px; border-radius: 999px;
@@ -51,7 +46,7 @@
       box-shadow: 0 4px 10px rgba(0,0,0,.45);
     }
 
-    /* Info card */
+    /* Card */
     .card-overlay {
       position: fixed; inset: auto 16px 16px auto; width: min(520px, calc(100% - 32px)); max-height: 80vh;
       border-radius: 14px; background: #0f141b; border: 1px solid #1e2633; box-shadow: 0 20px 60px rgba(0,0,0,.6);
@@ -100,37 +95,36 @@
   <div id="toast" class="toast"></div>
 
   <script>
-    /* ===== Your repo (public) ===== */
+    /* ===== Repo & folders (public) ===== */
     const GH_USER = "lukeo25";
     const GH_REPO = "gallery";
-
-    /* Panorama: raw URL avoids relative path issues */
     const PANORAMA_URL = "https://raw.githubusercontent.com/lukeo25/gallery/refs/heads/main/gallery/gallery001.png";
+    const API_LIST = `https://api.github.com/repos/${GH_USER}/${GH_REPO}/contents/artworks`;
 
-    /* List images in artworks/ via GitHub Contents API */
-    const GITHUB_CONTENTS_API = `https://api.github.com/repos/${GH_USER}/${GH_REPO}/contents/artworks`;
-
-    /* Layout */
+    /* Layout across 360°. If you want a single wall, say and I’ll switch it. */
     const LAYOUT = { rows: 1, pitchTopDeg: 3, pitchRowGapDeg: -12, yawOffsetDeg: 0 };
 
-    /* Fake perspective parameters */
+    /* Wall-aware “fake perspective” */
     const TILT = {
-      yawFactor: 0.85,
-      pitchFactor: 0.60,
-      maxYaw: 35,
+      yawFactor: 1.0,      // effect strength for left/right
+      pitchFactor: 0.8,    // effect strength for up/down
+      maxYaw: 35,          // clamps
       maxPitch: 25,
-      perspective: 900
+      perspective: 1000,   // CSS perspective(px)
+      snap: 90,            // snap each frame to nearest wall normal (every 90°)
+      invertYaw: false,    // flip if rotation still feels reversed for your pano
+      invertPitch: true    // flip pitch so looking up makes top tilt away (usually true)
     };
 
-    /* Size box for artworks (CSS pixels before Pannellum scales them) */
+    /* Billboard size box in CSS pixels (before pannellum scales with zoom) */
     const SIZE_BOX = { maxW: 240, maxH: 240, minW: 100, minH: 100 };
 
-    /* Helpers */
+    /* Utils */
     function el(q){ return document.querySelector(q); }
     function toast(msg,ms=2400){ const t=el('#toast'); t.textContent=msg; t.style.display='block'; clearTimeout(toast._h); toast._h=setTimeout(()=>t.style.display='none',ms); }
     function escapeHtml(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
     function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
-    function normDeg(d){ d = ((d + 180) % 360 + 360) % 360 - 180; return d; }
+    function normDeg(d){ d = ((d + 180) % 360 + 360) % 360 - 180; return d; } // [-180,180]
 
     function numFromFilename(name){
       const m = /^(\d+)\.(png|jpg|jpeg|webp)$/i.exec(name);
@@ -138,7 +132,7 @@
     }
 
     async function fetchArtworkList(){
-      const res = await fetch(GITHUB_CONTENTS_API, { cache: 'no-store' });
+      const res = await fetch(API_LIST, { cache: 'no-store' });
       if(!res.ok) throw new Error("GitHub API " + res.status);
       const files = await res.json();
       return files
@@ -165,8 +159,8 @@
       return { yaw, pitch };
     }
 
-    /* Keep refs to wrappers for tilt updates */
-    const HOTSPOTS = []; // {wrap, yaw, pitch}
+    /* Keep refs for tilt */
+    const HOTSPOTS = []; // {wrap, yaw, pitch, wallYaw}
 
     let viewer = null, rafId = null;
 
@@ -190,7 +184,6 @@
         try {
           const items = await fetchArtworkList();
           addArtHotspots(items);
-          // Fade in after Pannellum places them and we size them
           requestAnimationFrame(() => {
             document.querySelectorAll('.art-slot').forEach(n => n.classList.add('ready'));
           });
@@ -204,7 +197,6 @@
     }
 
     function slotRenderer(div, args){
-      // Build wrapper we rotate for perspective
       const wrap = document.createElement('div');
       wrap.className = 'art-wrap';
       wrap.style.transform = `perspective(${TILT.perspective}px)`;
@@ -219,35 +211,28 @@
       wrap.appendChild(tile);
       div.appendChild(wrap);
 
-      // Click / keyboard
-      tile.addEventListener('click', ()=>openCard(args));
-      tile.addEventListener('keydown', e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); openCard(args);} });
-
-      // Measure the image and set the exact aspect-ratio size
+      // Size to true aspect ratio
       const img = new Image();
       img.onload = () => {
         const iw = img.naturalWidth || 1;
         const ih = img.naturalHeight || 1;
         const aspect = iw / ih;
-
-        // Fit inside SIZE_BOX while keeping aspect; also respect minimums
         let w = SIZE_BOX.maxW, h = w / aspect;
         if (h > SIZE_BOX.maxH) { h = SIZE_BOX.maxH; w = h * aspect; }
         if (w < SIZE_BOX.minW) { w = SIZE_BOX.minW; h = w / aspect; }
         if (h < SIZE_BOX.minH) { h = SIZE_BOX.minH; w = h * aspect; }
-
         tile.style.width = `${Math.round(w)}px`;
         tile.style.height = `${Math.round(h)}px`;
       };
-      img.onerror = () => {
-        // Fallback size if image meta fails
-        tile.style.width = `${SIZE_BOX.minW}px`;
-        tile.style.height = `${SIZE_BOX.minH}px`;
-      };
+      img.onerror = () => { tile.style.width = `${SIZE_BOX.minW}px`; tile.style.height = `${SIZE_BOX.minH}px`; };
       img.src = args.imageUrl;
 
-      // Register for tilt updates
-      HOTSPOTS.push({ wrap, yaw: args._yaw, pitch: args._pitch });
+      tile.addEventListener('click', ()=>openCard(args));
+      tile.addEventListener('keydown', e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); openCard(args);} });
+
+      // “Wall normal” yaw = nearest multiple of TILT.snap (e.g., 0, ±90, 180)
+      const wallYaw = Math.round(args._yaw / TILT.snap) * TILT.snap;
+      HOTSPOTS.push({ wrap, yaw: args._yaw, pitch: args._pitch, wallYaw });
     }
 
     function addArtHotspots(items){
@@ -257,24 +242,29 @@
         viewer.addHotSpot({
           pitch: pos.pitch,
           yaw: pos.yaw,
-          scale: true,                 // scale with zoom to feel anchored
-          cssClass: 'art-slot',        // ok on container; our tile is inside wrap
+          scale: true,                 // scales with zoom so it feels attached
+          cssClass: 'art-slot',
           createTooltipFunc: slotRenderer,
           createTooltipArgs: { ...art, _yaw: pos.yaw, _pitch: pos.pitch }
         });
       });
     }
 
-    /* Tilt wrappers so they appear planar-ish relative to camera */
+    /* Wall-aware fake perspective: tilt by (wallYaw - cameraYaw) and (pitch - cameraPitch) */
     function updateTilt(){
       if(!viewer) return;
       const cy = viewer.getYaw();
       const cp = viewer.getPitch();
       for(const h of HOTSPOTS){
-        const dy = normDeg(h.yaw - cy);
+        const dy = normDeg(h.wallYaw - cy);    // compare to wall normal, not hotspot bearing
         const dp = normDeg(h.pitch - cp);
-        const ry = clamp(dy * TILT.yawFactor, -TILT.maxYaw, TILT.maxYaw);
-        const rx = clamp(-dp * TILT.pitchFactor, -TILT.maxPitch, TILT.maxPitch);
+
+        let ry = clamp(dy * TILT.yawFactor, -TILT.maxYaw, TILT.maxYaw);
+        let rx = clamp(dp * TILT.pitchFactor, -TILT.maxPitch, TILT.maxPitch);
+
+        if (TILT.invertYaw)  ry = -ry;
+        if (TILT.invertPitch) rx = -rx;
+
         h.wrap.style.transform = `perspective(${TILT.perspective}px) rotateY(${ry}deg) rotateX(${rx}deg)`;
       }
     }
