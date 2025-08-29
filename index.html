@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Baked 10×10 m Room — Equirect Gallery</title>
+  <title>Gallery — Baked Walls + Artworks</title>
 
   <!-- Pannellum -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css">
@@ -17,6 +17,7 @@
     #viewer{height:calc(100vh - 48px)}
     #bake{display:none}
 
+    /* Invisible, clickable hotspots for artworks */
     .hotspot-hit{width:220px;height:140px;background:rgba(255,255,255,0);border:0;outline:none;cursor:pointer}
     .hotspot-hit:focus{box-shadow:0 0 0 2px #5da0ffaa;border-radius:6px}
 
@@ -25,37 +26,45 @@
 </head>
 <body>
   <header>
-    <h1>Baked 10×10 m Room — Equirect Gallery</h1>
-    <div class="hint">Artworks are projected onto real 10×10 m walls and baked into the panorama; hotspots are transparent.</div>
+    <h1>Gallery — Baked Walls + Artworks</h1>
+    <div class="hint">Wall PNGs are projected onto real room planes, then artworks are baked over them. Hotspots are transparent.</div>
   </header>
 
   <div id="viewer"></div>
   <canvas id="bake"></canvas>
-  <div class="toast" id="toast"></div>
+  <div id="toast" class="toast"></div>
 
   <script>
     /* ===================== Config ===================== */
     const GH_USER = "lukeo25";
     const GH_REPO = "gallery";
-    const ARTWORKS_API = `https://api.github.com/repos/${GH_USER}/${GH_REPO}/contents/artworks`;
-    const PANO_URL_RAW  = "https://raw.githubusercontent.com/lukeo25/gallery/refs/heads/main/gallery/gallery001.png";
 
-    const ROOM = { width: 10.0, depth: 10.0, eyeY: 1.6 };
-    const HALF_W = ROOM.width/2;   // 5 m
-    const HALF_D = ROOM.depth/2;   // 5 m
+    const PANO_URL_RAW   = "https://raw.githubusercontent.com/lukeo25/gallery/refs/heads/main/gallery/gallery001.png";
+    const WALLS_API      = `https://api.github.com/repos/${GH_USER}/${GH_REPO}/contents/walls`;
+    const ARTWORKS_API   = `https://api.github.com/repos/${GH_USER}/${GH_REPO}/contents/artworks`;
 
+    /* Room geometry (meters) */
+    const ROOM = { width: 10.0, depth: 10.0, height: 3.0, eyeY: 1.6 };
+    const HALF_W = ROOM.width/2;   // ±5m in x
+    const HALF_D = ROOM.depth/2;   // ±5m in z
+
+    /* Artwork sizing (meters). Width preserves image aspect (capped). */
     const ART_SIZE_M = { height: 1.2, maxWidth: 2.0 };
-    const HANG_Y = 1.5;
+    const HANG_Y = 1.5; // center height in meters
 
-    const FRAME = { enabled: true, shadow: "rgba(0,0,0,0.35)", blur: 16, offsetX: 0, offsetY: 6, border: "rgba(255,255,255,0.85)", borderPx: 2 };
+    /* Optional crisp white border baked around artworks */
+    const FRAME = { enabled: true, rgba: "rgba(255,255,255,0.9)", thicknessPct: 0.02 }; // 2% of min side
 
+    /* Hotspot base size in CSS px (Pannellum scales it with zoom) */
     const HOTSPOT_BASE_PX = { w: 220, h: 140 };
 
+    /* ROI margin (degrees) for per-pixel baking bounds */
     const ROI_MARGIN_DEG = 2.0;
+
     /* ================================================== */
 
     const el = q => document.querySelector(q);
-    function toast(msg,ms=2200){ const t=el('#toast'); t.textContent=msg; t.style.display='block'; clearTimeout(toast._h); toast._h=setTimeout(()=>t.style.display='none',ms); }
+    function toast(msg,ms=2400){ const t=el('#toast'); t.textContent=msg; t.style.display='block'; clearTimeout(toast._h); toast._h=setTimeout(()=>t.style.display='none',ms); }
 
     const D2R = Math.PI/180, R2D = 180/Math.PI;
     const sin=Math.sin, cos=Math.cos, tan=Math.tan, atan2=Math.atan2, asin=Math.asin, abs=Math.abs;
@@ -63,18 +72,39 @@
     function normYawDeg(a){ a=((a+180)%360+360)%360-180; return a; }
     function yawPitchFromPoint(px,py,pz){
       const L = Math.hypot(px,py,pz);
-      const yaw   = atan2(pz, px) * R2D;
-      const pitch = asin(py / L) * R2D;
-      return { yaw, pitch };
+      return { yaw: atan2(pz, px) * R2D, pitch: asin(py / L) * R2D };
     }
     function dirFromYawPitch(yawDeg,pitchDeg){
       const y=yawDeg*D2R, p=pitchDeg*D2R;
       const cp=cos(p), sp=sin(p), cy=cos(y), sy=sin(y);
       return [cp*cy, sp, cp*sy];
     }
+    function yawInRange(yaw, minYaw, maxYaw){
+      const width = ((maxYaw - minYaw + 360) % 360);
+      const pos   = ((yaw    - minYaw + 360) % 360);
+      return pos <= width;
+    }
+    function blend(dst, di, sr, sg, sb, sa){
+      const a = sa/255, ia = 1-a;
+      dst[di    ] = Math.round(sr*a + dst[di    ]*ia);
+      dst[di + 1] = Math.round(sg*a + dst[di + 1]*ia);
+      dst[di + 2] = Math.round(sb*a + dst[di + 2]*ia);
+      dst[di + 3] = Math.round(255*(a + (dst[di + 3]/255)*ia));
+    }
 
+    /* ---------- Repo helpers ---------- */
+    async function listPngs(folderApi){
+      const r = await fetch(folderApi, { cache:'no-store' });
+      if (!r.ok) {
+        if (r.status === 404) return []; // folder missing is fine
+        throw new Error("GitHub API "+r.status);
+      }
+      const files = await r.json();
+      return files.filter(f => f.type==="file" && /\.png$/i.test(f.name))
+                  .map(f => ({ name: f.name.toLowerCase(), url: f.download_url }));
+    }
     async function listArtworks(){
-      const r = await fetch(ARTWORKS_API,{cache:'no-store'});
+      const r = await fetch(ARTWORKS_API, { cache:'no-store' });
       if(!r.ok) throw new Error("GitHub API "+r.status);
       const files = await r.json();
       return files
@@ -96,119 +126,153 @@
       });
     }
 
+    /* ---------- Wall definitions (planes) ---------- */
     const WALLS = [
-      { id:"west",  n:[+1,0,0],  u:[0,0,+1], v:[0,1,0], point:[-HALF_W,0,0],  span: ROOM.depth },
-      { id:"east",  n:[-1,0,0],  u:[0,0,-1], v:[0,1,0], point:[+HALF_W,0,0],  span: ROOM.depth },
-      { id:"north", n:[0,0,+1],  u:[+1,0,0], v:[0,1,0], point:[0,0,-HALF_D], span: ROOM.width },
-      { id:"south", n:[0,0,-1],  u:[-1,0,0], v:[0,1,0], point:[0,0,+HALF_D], span: ROOM.width }
+      { id:"west",  n:[+1,0,0],  u:[0,0,+1], v:[0,1,0], point:[-HALF_W,0,0],  span: ROOM.depth }, // along z
+      { id:"east",  n:[-1,0,0],  u:[0,0,-1], v:[0,1,0], point:[+HALF_W,0,0],  span: ROOM.depth }, // along -z
+      { id:"north", n:[0,0,+1],  u:[+1,0,0], v:[0,1,0], point:[0,0,-HALF_D], span: ROOM.width }, // along x
+      { id:"south", n:[0,0,-1],  u:[-1,0,0], v:[0,1,0], point:[0,0,+HALF_D], span: ROOM.width }  // along -x
     ];
 
-    function autoPlace(files, aspects){
-      const perWall = Math.ceil(files.length / WALLS.length);
-      const placements = [];
-      let idx = 0;
+    /* ---------- Wall overlay baking ---------- */
+    function roiFromRect(C,u,v,hw,hh){
+      const corners = [
+        [C[0]-hw*u[0]-hh*v[0], C[1]-hw*u[1]-hh*v[1], C[2]-hw*u[2]-hh*v[2]],
+        [C[0]+hw*u[0]-hh*v[0], C[1]+hw*u[1]-hh*v[1], C[2]+hw*u[2]-hh*v[2]],
+        [C[0]-hw*u[0]+hh*v[0], C[1]-hw*u[1]+hh*v[1], C[2]-hw*u[2]+hh*v[2]],
+        [C[0]+hw*u[0]+hh*v[0], C[1]+hw*u[1]+hh*v[1], C[2]+hw*u[2]+hh*v[2]]
+      ].map(p => yawPitchFromPoint(p[0], p[1]-ROOM.eyeY, p[2]));
+      let yawMin=+180,yawMax=-180,pitchMin=+90,pitchMax=-90;
+      corners.forEach(a=>{ yawMin=Math.min(yawMin,a.yaw); yawMax=Math.max(yawMax,a.yaw); pitchMin=Math.min(pitchMin,a.pitch); pitchMax=Math.max(pitchMax,a.pitch); });
+      yawMin = normYawDeg(yawMin - ROI_MARGIN_DEG);
+      yawMax = normYawDeg(yawMax + ROI_MARGIN_DEG);
+      pitchMin -= ROI_MARGIN_DEG; pitchMax += ROI_MARGIN_DEG;
+      return { yawMin,yawMax,pitchMin,pitchMax };
+    }
 
+    async function bakeWalls(ctx, dest, W, H){
+      const wallPngs = await listPngs(WALLS_API); // [{name,url},...]
+      if (!wallPngs.length) return;
+
+      const map = Object.create(null);
+      for (const f of wallPngs) map[f.name] = f.url;
+
+      // Load whichever of the 4 exists
+      const overlays = {};
+      async function loadIf(name){ if(map[name]) overlays[name] = await loadImage(map[name]); }
+      await Promise.all([
+        loadIf("north.png"), loadIf("south.png"),
+        loadIf("east.png"),  loadIf("west.png")
+      ]);
+
+      const D = dest.data;
+
+      for (const wall of WALLS){
+        const img = overlays[wall.id + ".png"];
+        if (!img) continue;
+
+        // Full wall rectangle: width = span, height = ROOM.height; center at half height
+        const hw = wall.span/2;
+        const hh = ROOM.height/2;
+        const C  = [ wall.point[0] + (ROOM.height/2)*wall.v[0],
+                     wall.point[1] + (ROOM.height/2)*wall.v[1],
+                     wall.point[2] + (ROOM.height/2)*wall.v[2] ];
+
+        // ROI in pano
+        const roi = roiFromRect(C, wall.u, wall.v, hw, hh);
+        const yMin = Math.max(0, Math.floor((90 - roi.pitchMax) / 180 * H));
+        const yMax = Math.min(H-1, Math.ceil((90 - roi.pitchMin) / 180 * H));
+
+        // Precompute plane intersection numerator
+        const CminusO = [ C[0], C[1]-ROOM.eyeY, C[2] ];
+        const n_dot_CminusO = wall.n[0]*CminusO[0] + wall.n[1]*CminusO[1] + wall.n[2]*CminusO[2];
+
+        // Sampler
+        const sC = document.createElement('canvas'); sC.width = img.naturalWidth; sC.height = img.naturalHeight;
+        const sX = sC.getContext('2d'); sX.drawImage(img,0,0);
+        const S = sX.getImageData(0,0,sC.width,sC.height).data;
+
+        for (let y=yMin; y<=yMax; y++){
+          const pitch = 90 - (y + 0.5) * 180 / H;
+          for (let x=0; x<W; x++){
+            const yaw = (x + 0.5) * 360 / W - 180;
+            if (!yawInRange(yaw, roi.yawMin, roi.yawMax)) continue;
+
+            const d = dirFromYawPitch(yaw, pitch);                 // ray dir
+            const n_dot_d = wall.n[0]*d[0] + wall.n[1]*d[1] + wall.n[2]*d[2];
+            if (Math.abs(n_dot_d) <= 1e-6) continue;               // parallel
+            const t = n_dot_CminusO / n_dot_d;
+            if (t <= 0) continue;                                   // behind eye
+
+            const Hx = t*d[0], Hy = ROOM.eyeY + t*d[1], Hz = t*d[2];
+            const rx = Hx - C[0], ry = Hy - C[1], rz = Hz - C[2];
+
+            const cu = rx*wall.u[0] + ry*wall.u[1] + rz*wall.u[2]; // meters
+            const cv = rx*wall.v[0] + ry*wall.v[1] + rz*wall.v[2];
+
+            if (abs(cu) > hw || abs(cv) > hh) continue;             // outside wall rect
+
+            // Map to PNG texel (u: left→right along wall, v: bottom→top)
+            const uu = (cu + hw) / (2*hw);                          // 0..1
+            const vv = (hh - cv) / (2*hh);                          // 0..1
+            const sx = Math.min(sC.width-1, Math.max(0, Math.floor(uu * sC.width)));
+            const sy = Math.min(sC.height-1, Math.max(0, Math.floor(vv * sC.height)));
+            const si = (sy * sC.width + sx) * 4;
+
+            const di = (y * W + x) * 4;
+            const a = S[si+3];
+            if (a === 0) continue;
+            blend(D, di, S[si], S[si+1], S[si+2], a);
+          }
+        }
+      }
+    }
+
+    /* ---------- Artwork placement & baking ---------- */
+    function autoPlace(files, aspects){
+      const placements = [];
+      const perWall = Math.ceil(files.length / WALLS.length);
+      let idx = 0;
       for (let w=0; w<WALLS.length && idx<files.length; w++){
         const wall = WALLS[w];
         const count = Math.min(perWall, files.length - idx);
         if (count <= 0) break;
 
-        const margin = 0.8;
+        const margin = 0.8;                         // meters from wall ends
         const usable = wall.span - 2*margin;
+
         for (let j=0; j<count; j++, idx++){
           const f = files[idx];
           const aspect = aspects[idx];
-
-          let h = ART_SIZE_M.height;
-          let wMeter = Math.min(ART_SIZE_M.maxWidth, h * aspect);
-
+          const h = ART_SIZE_M.height;
+          const wM = Math.min(ART_SIZE_M.maxWidth, h * aspect);
           const t = (j + 0.5) / count;
           const along = -usable/2 + margin + t * usable;
 
-          const Pcx = wall.point[0] + along*wall.u[0] + HANG_Y*wall.v[0];
-          const Pcy = wall.point[1] + along*wall.u[1] + HANG_Y*wall.v[1];
-          const Pcz = wall.point[2] + along*wall.u[2] + HANG_Y*wall.v[2];
-
-          const hw = wMeter/2, hh = h/2;
+          const C = [
+            wall.point[0] + along*wall.u[0] + HANG_Y*wall.v[0],
+            wall.point[1] + along*wall.u[1] + HANG_Y*wall.v[1],
+            wall.point[2] + along*wall.u[2] + HANG_Y*wall.v[2]
+          ];
+          const hw = wM/2, hh = h/2;
 
           placements.push({
-            file: f,
-            wallIndex: w,
-            n: wall.n.slice(), u: wall.u.slice(), v: wall.v.slice(),
-            C: [Pcx, Pcy, Pcz],
-            hw, hh,
-            centerYawPitch: yawPitchFromPoint(Pcx, Pcy-ROOM.eyeY, Pcz)
+            file: f, n: wall.n.slice(), u: wall.u.slice(), v: wall.v.slice(),
+            C, hw, hh,
+            centerYawPitch: yawPitchFromPoint(C[0], C[1]-ROOM.eyeY, C[2])
           });
         }
       }
       return placements;
     }
 
-    function roiFromRect(C, u, v, hw, hh){
-      const corners = [
-        [C[0] - hw*u[0] - hh*v[0], C[1] - hw*u[1] - hh*v[1], C[2] - hw*u[2] - hh*v[2]],
-        [C[0] + hw*u[0] - hh*v[0], C[1] + hw*u[1] - hh*v[1], C[2] + hw*u[2] - hh*v[2]],
-        [C[0] - hw*u[0] + hh*v[0], C[1] - hw*u[1] + hh*v[1], C[2] - hw*u[2] + hh*v[2]],
-        [C[0] + hw*u[0] + hh*v[0], C[1] + hw*u[1] + hh*v[1], C[2] + hw*u[2] + hh*v[2]]
-      ];
-      const yShifted = corners.map(p => yawPitchFromPoint(p[0], p[1]-ROOM.eyeY, p[2]));
-      let yawMin = +180, yawMax = -180, pitchMin = +90, pitchMax = -90;
-      yShifted.forEach(a => {
-        yawMin   = Math.min(yawMin, a.yaw);
-        yawMax   = Math.max(yawMax, a.yaw);
-        pitchMin = Math.min(pitchMin, a.pitch);
-        pitchMax = Math.max(pitchMax, a.pitch);
-      });
-      yawMin   = normYawDeg(yawMin - ROI_MARGIN_DEG);
-      yawMax   = normYawDeg(yawMax + ROI_MARGIN_DEG);
-      pitchMin -= ROI_MARGIN_DEG;
-      pitchMax += ROI_MARGIN_DEG;
-      return { yawMin, yawMax, pitchMin, pitchMax };
-    }
-
-    function yawInRange(yaw, minYaw, maxYaw){
-      const width = ((maxYaw - minYaw + 360) % 360);
-      const pos   = ((yaw    - minYaw + 360) % 360);
-      return pos <= width;
-    }
-
-    function blend(dst, di, sr, sg, sb, sa){
-      const a = sa/255;
-      const ia = 1 - a;
-      dst[di    ] = Math.round(sr*a + dst[di    ]*ia);
-      dst[di + 1] = Math.round(sg*a + dst[di + 1]*ia);
-      dst[di + 2] = Math.round(sb*a + dst[di + 2]*ia);
-      dst[di + 3] = Math.round(255*(a + (dst[di + 3]/255)*ia));
-    }
-
-    async function bakeComposite(){
-      const [panoImg, files] = await Promise.all([ loadImage(PANO_URL_RAW), listArtworks() ]);
-      const artImgs = await Promise.all(files.map(f => loadImage(f.url)));
-      const aspects = artImgs.map(im => (im.naturalWidth || 1)/(im.naturalHeight || 1));
-
-      const placements = autoPlace(files, aspects);
-
-      const W = panoImg.naturalWidth;
-      const H = panoImg.naturalHeight;
-      const cvs = el('#bake'); cvs.width=W; cvs.height=H;
-      const ctx = cvs.getContext('2d');
-      ctx.drawImage(panoImg, 0, 0, W, H);
-
-      const dest = ctx.getImageData(0, 0, W, H);
+    function drawArtworks(dest, W, H, placements, samplers){
       const D = dest.data;
 
-      const samplers = artImgs.map(img => {
-        const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight;
-        const cctx = c.getContext('2d'); cctx.drawImage(img,0,0);
-        return { w:c.width, h:c.height, data: cctx.getImageData(0,0,c.width,c.height).data };
-      });
-
       for (let i=0; i<placements.length; i++){
-        const P = placements[i];
-        const S = samplers[i];
+        const P = placements[i], S = samplers[i];
 
         const roi = roiFromRect(P.C, P.u, P.v, P.hw, P.hh);
-
         const yMin = Math.max(0, Math.floor((90 - roi.pitchMax) / 180 * H));
         const yMax = Math.min(H-1, Math.ceil((90 - roi.pitchMin) / 180 * H));
 
@@ -223,20 +287,14 @@
 
             const d = dirFromYawPitch(yaw, pitch);
             const n_dot_d = P.n[0]*d[0] + P.n[1]*d[1] + P.n[2]*d[2];
-            if (Math.abs(n_dot_d) <= 1e-6) continue;   // <-- FIXED
-
+            if (Math.abs(n_dot_d) <= 1e-6) continue;
             const t = n_dot_CminusO / n_dot_d;
             if (t <= 0) continue;
 
-            const Hx = t*d[0];
-            const Hy = ROOM.eyeY + t*d[1];
-            const Hz = t*d[2];
-
+            const Hx = t*d[0], Hy = ROOM.eyeY + t*d[1], Hz = t*d[2];
             const rx = Hx - P.C[0], ry = Hy - P.C[1], rz = Hz - P.C[2];
-
             const cu = rx*P.u[0] + ry*P.u[1] + rz*P.u[2];
             const cv = rx*P.v[0] + ry*P.v[1] + rz*P.v[2];
-
             if (abs(cu) > P.hw || abs(cv) > P.hh) continue;
 
             const uu = (cu + P.hw) / (2*P.hw);
@@ -244,22 +302,23 @@
             const sx = Math.min(S.w-1, Math.max(0, Math.floor(uu * S.w)));
             const sy = Math.min(S.h-1, Math.max(0, Math.floor(vv * S.h)));
             const si = (sy * S.w + sx) * 4;
-
-            const r = S.data[si], g = S.data[si+1], b = S.data[si+2], a = S.data[si+3];
+            const a = S.data[si+3];
             if (a === 0) continue;
 
             const di = (y * W + x) * 4;
-            blend(D, di, r, g, b, a);
+            blend(D, di, S.data[si], S.data[si+1], S.data[si+2], a);
           }
         }
 
-        if (FRAME.enabled && FRAME.borderPx > 0){
-          const borderColor = FRAME.border;
-          const m = /rgba\((\d+),\s*(\d+),\s*(\d+),\s*([0-9.]+)\)/.exec(borderColor);
-          const rr = m?parseInt(m[1],10):255, gg=m?parseInt(m[2],10):255, bb=m?parseInt(m[3],10):255, aa=m?Math.round(parseFloat(m[4])*255):220;
+        if (FRAME.enabled && FRAME.thicknessPct > 0){
+          const m = /rgba\((\d+),\s*(\d+),\s*(\d+),\s*([0-9.]+)\)/.exec(FRAME.rgba);
+          const rr = m?parseInt(m[1],10):255, gg=m?parseInt(m[2],10):255, bb=m?parseInt(m[3],10):255, aa=m?Math.round(parseFloat(m[4])*255):230;
 
+          const band = Math.max(P.hw, P.hh) * FRAME.thicknessPct;
           const yMin2 = Math.max(0, Math.floor((90 - (roi.pitchMax+0.5)) / 180 * H));
           const yMax2 = Math.min(H-1, Math.ceil((90 - (roi.pitchMin-0.5)) / 180 * H));
+
+          const n_dot_CminusO2 = n_dot_CminusO;
           for (let y=yMin2; y<=yMax2; y++){
             const pitch = 90 - (y + 0.5) * 180 / H;
             for (let x=0; x<W; x++){
@@ -267,8 +326,8 @@
               if (!yawInRange(yaw, roi.yawMin, roi.yawMax)) continue;
               const d = dirFromYawPitch(yaw, pitch);
               const n_dot_d = P.n[0]*d[0] + P.n[1]*d[1] + P.n[2]*d[2];
-              if (Math.abs(n_dot_d) <= 1e-6) continue;  // <-- FIXED
-              const t = n_dot_CminusO / n_dot_d;
+              if (Math.abs(n_dot_d) <= 1e-6) continue;
+              const t = n_dot_CminusO2 / n_dot_d;
               if (t <= 0) continue;
 
               const Hx = t*d[0], Hy = ROOM.eyeY + t*d[1], Hz = t*d[2];
@@ -276,9 +335,8 @@
               const cu = rx*P.u[0] + ry*P.u[1] + rz*P.u[2];
               const cv = rx*P.v[0] + ry*P.v[1] + rz*P.v[2];
               if (abs(cu) > P.hw || abs(cv) > P.hh) continue;
-
               const edge = Math.min(P.hw - abs(cu), P.hh - abs(cv));
-              if (edge > Math.max(P.hw, P.hh)*0.02) continue;
+              if (edge > band) continue;
 
               const di = (y * W + x) * 4;
               blend(D, di, rr, gg, bb, aa);
@@ -286,23 +344,58 @@
           }
         }
       }
+    }
 
+    /* ---------- Main bake ---------- */
+    async function bakeComposite(){
+      const [panoImg, wallFiles, artFiles] = await Promise.all([
+        loadImage(PANO_URL_RAW),
+        listPngs(WALLS_API),
+        listArtworks()
+      ]);
+      const W = panoImg.naturalWidth, H = panoImg.naturalHeight;
+      const cvs = el('#bake'); cvs.width=W; cvs.height=H;
+      const ctx = cvs.getContext('2d');
+      ctx.drawImage(panoImg, 0, 0, W, H);
+      const dest = ctx.getImageData(0, 0, W, H);
+
+      // 1) Bake wall overlays (if any)
+      if (wallFiles.length){
+        await bakeWalls(ctx, dest, W, H);
+      }
+
+      // 2) Bake artworks
+      const artImgs = await Promise.all(artFiles.map(f => loadImage(f.url)));
+      const aspects = artImgs.map(im => (im.naturalWidth||1)/(im.naturalHeight||1));
+      const placements = autoPlace(artFiles, aspects);
+
+      // Build samplers for artworks
+      const samplers = artImgs.map(img => {
+        const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight;
+        const cc = c.getContext('2d'); cc.drawImage(img,0,0);
+        return { w:c.width, h:c.height, data: cc.getImageData(0,0,c.width,c.height).data };
+      });
+
+      drawArtworks(dest, W, H, placements, samplers);
+
+      // Commit baked pixels and export URL
       ctx.putImageData(dest, 0, 0);
       const blob = await new Promise(res => cvs.toBlob(res, "image/png", 0.95));
-      const url = URL.createObjectURL(blob);
+      const panoUrl = URL.createObjectURL(blob);
 
+      // Hotspot centers (transparent hitboxes)
       const items = placements.map((P,i) => ({
         number: String(placements[i].file.n),
         yaw:    placements[i].centerYawPitch.yaw,
         pitch:  placements[i].centerYawPitch.pitch,
         url:    placements[i].file.url,
-        w: HOTSPOT_BASE_PX.w,
-        h: HOTSPOT_BASE_PX.h
+        w: HOTSPOT_BASE_PX.w, h: HOTSPOT_BASE_PX.h
       }));
 
-      return { url, items };
+      return { panoUrl, items };
     }
 
+    /* ---------- Viewer ---------- */
     function startViewer(panoUrl, items){
       const viewer = pannellum.viewer('viewer', {
         type: 'equirectangular',
@@ -316,9 +409,7 @@
       viewer.on('load', () => {
         items.forEach(a => {
           viewer.addHotSpot({
-            yaw: a.yaw,
-            pitch: a.pitch,
-            scale: true,
+            yaw: a.yaw, pitch: a.pitch, scale: true,
             createTooltipFunc: (div, args) => {
               div.className = 'hotspot-hit';
               div.style.width  = args.w + 'px';
@@ -326,9 +417,7 @@
               div.setAttribute('aria-label', 'Artwork '+args.number);
               div.tabIndex = 0;
               div.addEventListener('click', () => openCard(args));
-              div.addEventListener('keydown', e => {
-                if(e.key==='Enter' || e.key===' '){ e.preventDefault(); openCard(args); }
-              });
+              div.addEventListener('keydown', e => { if(e.key==='Enter'||e.key===' '){ e.preventDefault(); openCard(args);} });
             },
             createTooltipArgs: { number:a.number, url:a.url, w:a.w, h:a.h }
           });
@@ -339,19 +428,20 @@
       viewer.on('error', e => { console.error(e); toast('Pannellum error'); });
 
       function openCard(a){
-        alert('Artwork #'+a.number);
+        alert('Artwork #'+a.number); // swap for your nicer card UI
       }
     }
 
+    /* ---------- Run ---------- */
     (async function main(){
       try{
-        toast('Baking artworks onto 10×10 m walls…');
-        const { url, items } = await bakeComposite();
+        toast('Baking walls and artworks…');
+        const { panoUrl, items } = await bakeComposite();
         toast('Starting viewer…');
-        startViewer(url, items);
-      }catch(e){
-        console.error(e);
-        toast('Failed to bake or load. Is repo public and folders correct?');
+        startViewer(panoUrl, items);
+      }catch(err){
+        console.error(err);
+        toast('Failed to bake or load. Check repo paths and that images are public.');
       }
     })();
   </script>
