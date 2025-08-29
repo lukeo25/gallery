@@ -39,8 +39,8 @@ const USE_BILINEAR = true;
 const BACKGROUND_RGBA = [255,255,255,255];
 
 /* ===================== LIGHTING ===================== */
-/* Global ambient baseline */
-const AMBIENT = 0.40;
+/* Brighter baseline so it never feels too dark */
+const AMBIENT = 0.55;
 
 /* Downlights: 5 per wall, soft cone + distance falloff */
 const DOWNLIGHTS = {
@@ -49,18 +49,18 @@ const DOWNLIGHTS = {
   belowCeiling: 0.12,      // just below ceiling
   coneAngleDeg: 60,        // cone full angle
   featherDeg: 22,          // soft edge width
-  intensity: 1.45,         // brightness per light
-  range: 7.0,              // meters (distance falloff)
+  intensity: 2.0,          // brightness per light (brighter)
+  range: 7.5,              // meters (reach further)
   forwardTiltDeg: 6        // 0 = straight down, >0 tilts toward wall
 };
 
 /* Specular highlight (gloss) */
-const SPECULAR = 0.10;
+const SPECULAR = 0.12;
 const SHININESS = 30.0;
 
-/* Shadows (cheap but effective): if true, block light when another plane lies between light and point */
-const SHADOWS = true;
-const SHADOW_EPS = 1e-3;     // avoid self-shadow acne
+/* Shadows (cheap but effective) — OFF for now so lights are obvious */
+const SHADOWS = false;
+const SHADOW_EPS = 1e-3;
 
 /* Bump/Normal strength */
 const BUMP_SCALE = 1.5;
@@ -151,7 +151,6 @@ async function loadPlaneTextures(map, planes){
     const normalUrl = map[pl.png.replace('.png','_n.png')];
     const bumpUrl   = map[pl.png.replace('.png','_b.png')];
 
-    // color
     const imgC = await loadImage(colorUrl);
     const cC = document.createElement('canvas');
     cC.width  = Math.max(1, Math.round(imgC.naturalWidth  * SUPERSAMPLE));
@@ -216,7 +215,7 @@ function buildDownlights(planes){
 
       lights.push({
         pos,
-        dir,                         // cone axis
+        dir,                         // cone axis (from light, outward)
         cone, feather,
         intensity: DOWNLIGHTS.intensity,
         range: DOWNLIGHTS.range
@@ -227,15 +226,18 @@ function buildDownlights(planes){
 }
 
 /* ---------- cone response + shadows ---------- */
+/* FIXED: use light->point vector for cone angle test */
 function spotContribution(light, P, N){
-  // To surface point P from light
-  const PL = sub(P, light.pos);
-  const dist = Math.hypot(PL[0],PL[1],PL[2]);
+  // Vector from light to point
+  const LP = sub(P, light.pos);
+  const dist = Math.hypot(LP[0],LP[1],LP[2]);
   if (dist <= 1e-6 || dist > light.range) return 0.0;
 
-  const L = normalize(mul(PL, -1)); // direction from P toward light (for lambert)
-  // cone angle
-  const cosA = dot(L, normalize(light.dir));
+  const V = normalize(LP); // light -> point (used for cone)
+  const L = normalize(mul(V, -1)); // point -> light (used for lambert)
+
+  // Cone angle using light->point
+  const cosA = dot(V, normalize(light.dir));
   const angle = Math.acos(Math.max(-1, Math.min(1, cosA)));
   if (angle > light.cone) return 0.0;
 
@@ -257,9 +259,9 @@ function spotContribution(light, P, N){
 /* Segment light->P visibility (simple hard shadows) */
 function visibleFromLight(light, P, planes, selfPlane){
   if (!SHADOWS) return 1.0;
-  const LtoP = sub(P, light.pos);
-  const distLP = Math.hypot(LtoP[0],LtoP[1],LtoP[2]);
-  const d = normalize(LtoP);
+  const LP = sub(P, light.pos);
+  const distLP = Math.hypot(LP[0],LP[1],LP[2]);
+  const d = normalize(LP); // **light -> point** direction
   for (const pl of planes){
     if (pl === selfPlane) continue; // prevent self-shadow
     const n_dot_d = dot(pl.N, d);
@@ -310,7 +312,7 @@ function sampleBump(tex, u, v){
   return normalize([ -BUMP_SCALE*dhdu, -BUMP_SCALE*dhdv, 1.0 ]);
 }
 
-/* ---------- render: nearest-hit + cones + shadows ---------- */
+/* ---------- render: nearest-hit + cones ---------- */
 async function bakeRoom(){
   const files = await listPngs(WALLS_API);
   const map = Object.create(null);
@@ -388,7 +390,7 @@ async function bakeRoom(){
       let spec = 0.0;
 
       for (const Lsrc of lights){
-        const vis = visibleFromLight(Lsrc, hit.P, planes, hit.pl);
+        const vis = visibleFromLight(Lsrc, hit.P, planes, hit.pl); // =1 when SHADOWS=false
         if (vis <= 0) continue;
 
         const contrib = spotContribution(Lsrc, hit.P, Nw) * vis;
@@ -404,7 +406,9 @@ async function bakeRoom(){
         }
       }
 
-      Lsum = Math.min(1.7, Lsum); // soft clamp
+      // gentle clamp so super bright spots don't blow out drastically
+      Lsum = Math.min(2.0, Lsum);
+
       const di = (y*W + x)*4;
       D[di  ] = Math.round(r * Lsum + 255 * spec);
       D[di+1] = Math.round(g * Lsum + 255 * spec);
