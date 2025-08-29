@@ -3,62 +3,59 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Pannellum Art Gallery – Equirectangular Slots</title>
+  <title>Virtual Gallery</title>
+
+  <!-- Pannellum CSS & JS -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css">
   <script src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js"></script>
+
   <style>
-    html, body { height: 100%; margin: 0; background: #0b0d10; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    html, body { height: 100%; margin: 0; background: #0b0d10; color: #e7ecf2; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
     #app { display: grid; grid-template-rows: auto 1fr; height: 100%; }
-    header { padding: 10px 14px; color: #e7ecf2; background: #12151a; border-bottom: 1px solid #1e2230; display: flex; gap: 12px; align-items: center; }
+    header { padding: 10px 14px; background: #12151a; border-bottom: 1px solid #1e2230; display: flex; gap: 12px; align-items: center; }
     header h1 { font-size: 16px; font-weight: 600; margin: 0; letter-spacing: .3px; }
-    header .hint { opacity: .7; font-size: 13px; }
+    header .hint { opacity: .75; font-size: 13px; }
+    #panoc { height: calc(100vh - 48px); position: relative; }
 
-    #panoc { position: relative; height: 100%; }
+    /* Safety sizing in case CDN CSS is slow */
+    .pnlm-container { position: relative; overflow: hidden; }
+    .pnlm-render-container, .pnlm-render-canvas { width: 100%; height: 100%; display: block; }
 
+    /* Hotspot tiles */
     .art-slot {
-      width: 180px;
-      height: 120px;
+      width: 180px; height: 120px;
       border: 4px solid rgba(255,255,255,.85);
       box-shadow: 0 6px 20px rgba(0,0,0,.45), inset 0 0 0 1px rgba(0,0,0,.25);
       border-radius: 6px;
-      background-size: cover;
-      background-position: center;
-      background-repeat: no-repeat;
-      cursor: pointer;
-      transition: transform .15s ease, box-shadow .15s ease;
+      background-size: cover; background-position: center; background-repeat: no-repeat;
+      cursor: pointer; transition: transform .15s ease, box-shadow .15s ease;
     }
     .art-slot:hover { transform: translateY(-2px) scale(1.02); box-shadow: 0 10px 24px rgba(0,0,0,.55), inset 0 0 0 1px rgba(0,0,0,.25); }
-    .art-slot::after{
+    .art-slot::after {
       content: attr(data-artno);
       position: absolute; right: -10px; top: -10px; width: 28px; height: 28px; border-radius: 999px;
       display: grid; place-items: center; background: #111923; color: #e7ecf2; font-size: 12px; border: 2px solid #3a4a63;
       box-shadow: 0 4px 10px rgba(0,0,0,.45);
     }
 
+    /* Info card */
     .card-overlay {
-      position: fixed;
-      inset: auto 16px 16px auto;
-      width: min(480px, calc(100% - 32px));
-      max-height: 80vh;
-      border-radius: 14px;
-      background: #0f141b;
-      border: 1px solid #1e2633;
-      box-shadow: 0 20px 60px rgba(0,0,0,.6);
-      color: #e7ecf2;
-      overflow: hidden;
-      display: none;
+      position: fixed; inset: auto 16px 16px auto; width: min(520px, calc(100% - 32px)); max-height: 80vh;
+      border-radius: 14px; background: #0f141b; border: 1px solid #1e2633; box-shadow: 0 20px 60px rgba(0,0,0,.6);
+      color: #e7ecf2; overflow: hidden; display: none; z-index: 20;
     }
     .card-header { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; padding: 14px 14px 10px; border-bottom: 1px solid #1b2230; }
     .card-title { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: .2px; }
     .card-meta { font-size: 13px; opacity: .8; }
     .card-close { appearance: none; background: transparent; color: #aeb9cc; border: 0; font-size: 22px; line-height: 1; cursor: pointer; padding: 6px 10px; border-radius: 8px; }
     .card-close:hover { color: #fff; background: #182132; }
-    .card-body { display: grid; grid-template-columns: 160px 1fr; gap: 14px; padding: 14px; align-items: start; }
-    .card-body img { width: 160px; height: 120px; object-fit: cover; border-radius: 8px; border: 1px solid #263145; box-shadow: 0 6px 24px rgba(0,0,0,.45); }
+    .card-body { display: grid; grid-template-columns: 180px 1fr; gap: 14px; padding: 14px; align-items: start; }
+    .card-body img { width: 180px; height: 135px; object-fit: cover; border-radius: 8px; border: 1px solid #263145; box-shadow: 0 6px 24px rgba(0,0,0,.45); }
     .card-desc { font-size: 14px; line-height: 1.45; color: #d6deea; white-space: pre-wrap; }
     .card-tags { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; }
     .tag { font-size: 12px; padding: 4px 8px; border-radius: 999px; background: #132033; color: #cfe0ff; border: 1px solid #21324a; }
 
-    .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 20px; background: #0f141b; color: #d4ddea; padding: 10px 14px; border-radius: 10px; font-size: 13px; border: 1px solid #223148; display: none; }
+    .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 20px; background: #0f141b; color: #d4ddea; padding: 10px 14px; border-radius: 10px; font-size: 13px; border: 1px solid #223148; display: none; z-index: 30; }
   </style>
 </head>
 <body>
@@ -90,69 +87,111 @@
   <div id="toast" class="toast"></div>
 
   <script>
-    const PANORAMA_URL = "gallery/gallery001.png";
-    const ART_IMAGE_BASE = "artworks/";
-    const ART_IMAGE_EXT = ".png";
-    const ZERO_PAD = 3;
+    /* ===== Paths & options (absolute URLs remove ambiguity) ===== */
+    const PANORAMA_URL   = "https://lukeo25.github.io/ArtGallery/gallery/gallery001.png";
+    const ART_IMAGE_BASE = "https://lukeo25.github.io/ArtGallery/artwork/";
+    const ART_IMAGE_EXT  = ".png";
+    const ZERO_PAD       = 3;
+
+    /* Scan for artwork/001.png..up to this many */
+    const ART_MAX_INDEX = 500;
+    const CONCURRENCY   = 16;
+
+    /* Optional Google Sheet CSV (publish to web -> CSV). Leave empty to skip. */
     const SHEET_CSV_URL = "";
 
-    const LAYOUT = {
-      rows: 1,
-      pitchTopDeg: 3,
-      pitchRowGapDeg: -10,
-      yawOffsetDeg: 0
-    };
+    /* Layout across the panorama */
+    const LAYOUT = { rows: 1, pitchTopDeg: 3, pitchRowGapDeg: -12, yawOffsetDeg: 0 };
 
-    const LIMIT_COUNT = 0;
-
-    const SAMPLE_CSV = `number,title,artist,year,medium,dimensions,price,description,image\n1,Sample Work 1,Unknown,2024,Plastic,40x30cm,$100,Description one,\n2,Sample Work 2,Unknown,2024,Plastic,50x35cm,$200,Description two,`;
-
-    function zeroPad(n, width) { const s = String(n); return s.length >= width ? s : "0".repeat(width - s.length) + s; }
-    function el(q) { return document.querySelector(q); }
-    function toast(msg, ms=2200){ const t=el('#toast'); t.textContent=msg; t.style.display='block'; clearTimeout(toast._h); toast._h=setTimeout(()=>t.style.display='none', ms); }
+    /* ===== Helpers ===== */
+    function el(q){ return document.querySelector(q); }
+    function zeroPad(n,w){ const s = String(n); return s.length >= w ? s : "0".repeat(w - s.length) + s; }
+    function toast(msg,ms=2600){ const t=el('#toast'); t.textContent=msg; t.style.display='block'; clearTimeout(toast._h); toast._h=setTimeout(()=>t.style.display='none',ms); }
+    function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
     function parseCSV(text){
-      const rows = []; let i=0, field='', row=[], inQuotes=false; 
-      while(i < text.length){
-        const c = text[i++];
-        if (inQuotes) {
-          if (c === '"') {
-            if (text[i] === '"') { field+='"'; i++; }
-            else { inQuotes = false; }
-          } else { field += c; }
-        } else {
-          if (c === '"') { inQuotes = true; }
-          else if (c === ',') { row.push(field); field=''; }
-          else if (c === '\n' || c === '\r') {
-            if (field!=='' || row.length) { row.push(field); rows.push(row); row=[]; field=''; }
-          } else { field += c; }
+      const rows=[]; let i=0, field='', row=[], q=false;
+      while(i<text.length){ const c=text[i++]; if(q){ if(c==='\"'){ if(text[i]==='\"'){ field+='\"'; i++; } else { q=false; } } else { field+=c; } }
+      else { if(c==='\"'){ q=true; } else if(c===','){ row.push(field); field=''; } else if(c==='\n'||c==='\r'){ if(field!==''||row.length){ row.push(field); rows.push(row); row=[]; field=''; } } else { field+=c; } } }
+      if(field!==''||row.length){ row.push(field); rows.push(row); }
+      const head=rows.shift().map(h=>h.trim());
+      return rows.filter(r=>r.length && r.some(v=>String(v).trim()!==''))
+                 .map(r=>Object.fromEntries(head.map((h,idx)=>[h,(r[idx]||'').trim()])));
+    }
+
+    async function fetchCSVMap(){
+      if(!SHEET_CSV_URL) return new Map();
+      try{
+        const res = await fetch(SHEET_CSV_URL, { cache:'no-store' });
+        if(!res.ok) throw new Error('CSV ' + res.status);
+        const rows = parseCSV(await res.text());
+        const map = new Map();
+        for(const r of rows){
+          const num = parseInt(r.number,10);
+          if(Number.isFinite(num)) map.set(num, r);
+        }
+        return map;
+      }catch(e){ console.warn('CSV load failed:', e); return new Map(); }
+    }
+
+    function resolveImageURL(fileName){
+      if(/^https?:\/\//i.test(fileName)) return fileName;
+      const base = ART_IMAGE_BASE.endsWith('/') ? ART_IMAGE_BASE : ART_IMAGE_BASE + '/';
+      return base + fileName.replace(/^\/*/,'');
+    }
+
+    async function exists(url){
+      try{
+        const res = await fetch(url, { method:'HEAD', cache:'no-store' });
+        return res.ok;
+      }catch{ return false; }
+    }
+
+    async function discoverArtworkNumbers(){
+      const nums = Array.from({length: ART_MAX_INDEX}, (_,i)=>i+1);
+      const found = [];
+      let idx = 0;
+
+      async function worker(){
+        while(idx < nums.length){
+          const n = nums[idx++]; // take next
+          const url = resolveImageURL(zeroPad(n, ZERO_PAD) + ART_IMAGE_EXT);
+          if(await exists(url)) found.push(n);
         }
       }
-      if (field!=='' || row.length) { row.push(field); rows.push(row); }
-      const header = rows.shift().map(h=>h.trim());
-      return rows.filter(r=>r.length && r.some(v=>String(v).trim()!==''))
-                 .map(r=>Object.fromEntries(header.map((h,idx)=>[h, (r[idx]||'').trim()])));
+      await Promise.all(Array.from({length: CONCURRENCY}, worker));
+      found.sort((a,b)=>a-b);
+      return found;
     }
 
     async function loadArtData(){
-      try {
-        if (SHEET_CSV_URL && SHEET_CSV_URL.startsWith('http')) {
-          const res = await fetch(SHEET_CSV_URL, { cache: 'no-store' });
-          if (!res.ok) throw new Error('CSV fetch failed: '+res.status);
-          const text = await res.text();
-          return parseCSV(text);
-        } else {
-          toast('Using sample data. Set SHEET_CSV_URL for live sheet.');
-          return parseCSV(SAMPLE_CSV);
-        }
-      } catch(err){ console.error(err); toast('Data load error. See console.'); return []; }
+      const csvMap = await fetchCSVMap();
+      const numbers = await discoverArtworkNumbers();
+      const items = numbers.map(n => {
+        const meta = csvMap.get(n) || {};
+        const imageUrl = meta.image && meta.image.trim()
+          ? resolveImageURL(meta.image.trim())
+          : resolveImageURL(zeroPad(n, ZERO_PAD) + ART_IMAGE_EXT);
+        return {
+          number: String(n),
+          title:  meta.title || '',
+          artist: meta.artist || '',
+          year:   meta.year || '',
+          medium: meta.medium || '',
+          dimensions: meta.dimensions || '',
+          price:  meta.price || '',
+          description: meta.description || '',
+          imageUrl
+        };
+      });
+      return items;
     }
 
-    function positionForIndex(indexZeroBased, total){
+    function positionForIndex(i,total){
       const rows = Math.max(1, LAYOUT.rows|0);
-      const perRow = Math.ceil(total / rows);
-      const row = Math.floor(indexZeroBased / perRow);
-      const idxInRow = indexZeroBased - row*perRow;
+      const perRow = Math.ceil(total/rows);
+      const row = Math.floor(i/perRow);
+      const idxInRow = i - row*perRow;
       const countThisRow = Math.min(perRow, total - row*perRow);
       const yawStep = 360 / countThisRow;
       const yaw = -180 + (idxInRow + 0.5) * yawStep + LAYOUT.yawOffsetDeg;
@@ -161,102 +200,89 @@
     }
 
     let viewer = null;
+    let loadTimer = null;
+
     function initPano(){
-      if (viewer) { try { viewer.destroy(); } catch(_){} }
+      if(viewer){ try{ viewer.destroy(); }catch{} }
+
       viewer = pannellum.viewer('panoc', {
         type: 'equirectangular',
         panorama: PANORAMA_URL,
         autoLoad: true,
         showControls: true,
-        compass: false,
-        yaw: 0,
-        pitch: 0,
-        hfov: 85,
-        minHfov: 40,
-        maxHfov: 110,
-        friction: 0.15,
+        yaw: 0, pitch: 0, hfov: 85, minHfov: 40, maxHfov: 110,
         backgroundColor: [11,13,16]
       });
 
+      viewer.on('error', e => {
+        console.error('Pannellum error:', e);
+        toast('Error loading panorama. See console.');
+      });
+
+      clearTimeout(loadTimer);
+      loadTimer = setTimeout(() => {
+        toast('Still loading… check that gallery001.png is reachable.');
+        console.warn('Timeout: pano likely not reachable at', PANORAMA_URL);
+      }, 9000);
+
       viewer.on('load', async () => {
-        const data = await loadArtData();
-        const items = (LIMIT_COUNT>0) ? data.slice(0, LIMIT_COUNT) : data;
+        clearTimeout(loadTimer);
+        const items = await loadArtData();
         addArtHotspots(items);
         toast(`${items.length} artworks loaded`);
       });
     }
 
-    function slotRenderer(hotSpotDiv, args){
-      hotSpotDiv.classList.add('art-slot');
-      hotSpotDiv.setAttribute('data-artno', args.number);
-      hotSpotDiv.style.backgroundImage = `url("${args.imageUrl}")`;
-      hotSpotDiv.addEventListener('click', ()=>openCard(args));
-      hotSpotDiv.setAttribute('role','button');
-      hotSpotDiv.setAttribute('tabindex','0');
-      hotSpotDiv.addEventListener('keydown', e=>{ if(e.key==='Enter' || e.key===' '){ e.preventDefault(); openCard(args);} });
+    function slotRenderer(div, args){
+      div.classList.add('art-slot');
+      div.setAttribute('data-artno', args.number);
+      div.style.backgroundImage = `url("${args.imageUrl}")`;
+      div.addEventListener('click', ()=>openCard(args));
+      div.setAttribute('role','button');
+      div.setAttribute('tabindex','0');
+      div.addEventListener('keydown', e => {
+        if(e.key==='Enter' || e.key===' '){ e.preventDefault(); openCard(args); }
+      });
     }
 
-    function addArtHotspots(artworks){
-      const total = artworks.length;
-      artworks.forEach((art, i)=>{
-        const n = parseInt(art.number, 10);
-        if (Number.isNaN(n)) return;
+    function addArtHotspots(items){
+      const total = items.length;
+      items.forEach((art, i) => {
         const pos = positionForIndex(i, total);
-        const imageUrl = art.image && art.image.trim() !== ''
-          ? resolveImageURL(art.image.trim())
-          : resolveImageURL(zeroPad(n, ZERO_PAD) + ART_IMAGE_EXT);
         viewer.addHotSpot({
           pitch: pos.pitch,
           yaw: pos.yaw,
           cssClass: 'art-slot',
           createTooltipFunc: slotRenderer,
-          createTooltipArgs: {
-            number: String(n),
-            title: art.title || '',
-            artist: art.artist || '',
-            year: art.year || '',
-            medium: art.medium || '',
-            dimensions: art.dimensions || '',
-            price: art.price || '',
-            description: art.description || '',
-            imageUrl
-          }
+          createTooltipArgs: art
         });
       });
     }
 
-    function resolveImageURL(fileName){
-      if (/^https?:\/\//i.test(fileName)) return fileName;
-      const base = ART_IMAGE_BASE.endsWith('/') ? ART_IMAGE_BASE : ART_IMAGE_BASE + '/';
-      return base + fileName.replace(/^\/*/,'');
-    }
-
-    function openCard(args){
-      el('#cardTitle').textContent = args.title ? args.title : `Artwork ${args.number}`;
-      const metaParts = [];
-      if (args.artist) metaParts.push(args.artist);
-      if (args.year) metaParts.push(args.year);
-      if (args.medium) metaParts.push(args.medium);
-      if (args.dimensions) metaParts.push(args.dimensions);
-      if (args.price) metaParts.push(args.price);
-      el('#cardMeta').textContent = metaParts.join(' • ');
-      el('#cardImg').src = args.imageUrl;
-      el('#cardDesc').textContent = args.description || '';
+    function openCard(a){
+      el('#cardTitle').textContent = a.title || `Artwork ${a.number}`;
+      const meta = [];
+      if (a.artist) meta.push(a.artist);
+      if (a.year) meta.push(a.year);
+      if (a.medium) meta.push(a.medium);
+      if (a.dimensions) meta.push(a.dimensions);
+      if (a.price) meta.push(a.price);
+      el('#cardMeta').textContent = meta.join(' • ');
+      el('#cardImg').src = a.imageUrl;
+      el('#cardDesc').textContent = a.description || '';
       const tags = [];
-      if (args.number) tags.push(`#${args.number}`);
-      if (args.title) tags.push(args.title);
-      el('#cardTags').innerHTML = tags.map(t=>`<span class="tag">${escapeHtml(t)}</span>`).join('');
+      if (a.number) tags.push(`#${a.number}`);
+      if (a.title) tags.push(a.title);
+      el('#cardTags').innerHTML = tags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('');
       el('#card').style.display = 'block';
       document.addEventListener('keydown', escListener);
     }
 
     function closeCard(){ el('#card').style.display = 'none'; document.removeEventListener('keydown', escListener); }
-    function escListener(e){ if (e.key === 'Escape') closeCard(); }
+    function escListener(e){ if(e.key === 'Escape') closeCard(); }
     el('#cardClose').addEventListener('click', closeCard);
 
-    function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c])); }
-
-    (async function main(){ initPano(); })();
+    (function main(){ initPano(); })();
   </script>
 </body>
 </html>
