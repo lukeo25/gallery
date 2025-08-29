@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Algorithmic Baked Equirect Gallery</title>
+  <title>Baked 10×10 m Room — Equirect Gallery</title>
 
   <!-- Pannellum -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css">
@@ -17,275 +17,346 @@
     #viewer{height:calc(100vh - 48px)}
     #bake{display:none}
 
-    /* Transparent clickable hotspot */
-    .hotspot-hit{
-      width:220px;height:140px;background:rgba(255,255,255,0);border:0;outline:none;cursor:pointer
-    }
+    /* Transparent, clickable hotspot (pannellum will scale it with zoom) */
+    .hotspot-hit{width:220px;height:140px;background:rgba(255,255,255,0);border:0;outline:none;cursor:pointer}
     .hotspot-hit:focus{box-shadow:0 0 0 2px #5da0ffaa;border-radius:6px}
+
     .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:20px;background:#0f141b;color:#d4ddea;padding:10px 14px;border-radius:10px;font-size:13px;border:1px solid #223148;display:none;z-index:30}
   </style>
 </head>
 <body>
   <header>
-    <h1>Algorithmic Baked Equirect Gallery</h1>
-    <div class="hint">Artworks are warped onto wall planes; hotspots are transparent click areas.</div>
+    <h1>Baked 10×10 m Room — Equirect Gallery</h1>
+    <div class="hint">Artworks are projected onto real 10×10 m walls and baked into the panorama; hotspots are transparent.</div>
   </header>
 
   <div id="viewer"></div>
   <canvas id="bake"></canvas>
-  <div id="toast" class="toast"></div>
+  <div class="toast" id="toast"></div>
 
   <script>
-    /* ===================== Config ===================== */
+    /* ===================== Config (edit if needed) ===================== */
+
+    /* Your public repo and inputs */
     const GH_USER = "lukeo25";
     const GH_REPO = "gallery";
     const ARTWORKS_API = `https://api.github.com/repos/${GH_USER}/${GH_REPO}/contents/artworks`;
     const PANO_URL_RAW  = "https://raw.githubusercontent.com/lukeo25/gallery/refs/heads/main/gallery/gallery001.png";
 
-    // Camera at origin, looking at equirect pano. "Walls" are vertical planes at distance R.
-    const R = 1.0;                              // distance from viewer to each wall plane
-    const ART_HEIGHT_DEG = 14;                  // how tall an artwork appears (angular) when centered
-    const LAYOUT = { rows: 1, yawOffsetDeg: 0, pitchDeg: 0 }; // all artworks on equator; auto-spaced by index
+    /* Room geometry (meters). Camera at (0, eyeY, 0) looking out to infinity (pano). */
+    const ROOM = { width: 10.0, depth: 10.0, eyeY: 1.6 };   // 10m × 10m, eye at 1.6m
+    const HALF_W = ROOM.width/2;   // 5m
+    const HALF_D = ROOM.depth/2;   // 5m
 
-    // Visual frame baked into the pano (soft border / shadow). Set enabled:false for pure images.
-    const FRAME = { enabled: true, shadow: "rgba(0,0,0,0.35)", blur: 14, offsetX: 0, offsetY: 6, border: "rgba(255,255,255,0.85)" };
+    /* Artwork sizing on walls (meters). We’ll preserve image aspect, clamped to these bounds. */
+    const ART_SIZE_M = { height: 1.2, maxWidth: 2.0 };    // ~portrait height 1.2m, cap width 2m
+    const HANG_Y = 1.5;                                   // center height of artworks (meters above floor)
 
-    // Hotspot base CSS size (Pannellum scales it with zoom when scale:true)
+    /* Visual frame baked into pano (soft shadow + border). Disable for pure images. */
+    const FRAME = { enabled: true, shadow: "rgba(0,0,0,0.35)", blur: 16, offsetX: 0, offsetY: 6, border: "rgba(255,255,255,0.85)", borderPx: 2 };
+
+    /* Hotspot base size in CSS px (scaled by Pannellum with zoom) */
     const HOTSPOT_BASE_PX = { w: 220, h: 140 };
 
-    // Performance guard (ROI margins in degrees)
-    const ROI_MARGIN_DEG = 2.0;                // expand computed yaw/pitch bounds a bit
-    /* ================================================== */
+    /* Conservative per-artwork yaw/pitch ROI margin (degrees) */
+    const ROI_MARGIN_DEG = 2.0;
+
+    /* ================================================================== */
 
     const el = q => document.querySelector(q);
-    function toast(msg, ms=2200){ const t=el('.toast'); t.textContent=msg; t.style.display='block'; clearTimeout(toast._h); toast._h=setTimeout(()=>t.style.display='none',ms); }
+    function toast(msg,ms=2200){ const t=el('#toast'); t.textContent=msg; t.style.display='block'; clearTimeout(toast._h); toast._h=setTimeout(()=>t.style.display='none',ms); }
 
-    // Degrees/radians helpers
+    /* Math helpers */
     const D2R = Math.PI/180, R2D = 180/Math.PI;
-    const sin = Math.sin, cos = Math.cos, atan2 = Math.atan2, asin = Math.asin, sqrt = Math.sqrt, abs = Math.abs, tan = Math.tan;
+    const sin=Math.sin, cos=Math.cos, tan=Math.tan, atan2=Math.atan2, asin=Math.asin, sqrt=Math.sqrt, abs=Math.abs;
 
-    function normYawDeg(a){ a = ((a + 180) % 360 + 360) % 360 - 180; return a; }
-
-    function yawPitchFromPoint(p){
-      const len = Math.hypot(p[0], p[1], p[2]);
-      const yaw = atan2(p[2], p[0]) * R2D;          // [-180,180]
-      const pitch = asin(p[1]/len) * R2D;           // [-90,90]
-      return { yaw: yaw, pitch: pitch };
+    function normYawDeg(a){ a=((a+180)%360+360)%360-180; return a; }   // [-180,180]
+    function yawPitchFromPoint(px,py,pz){
+      const L = Math.hypot(px,py,pz);
+      const yaw   = atan2(pz, px) * R2D;     // [-180,180]
+      const pitch = asin(py / L) * R2D;      // [-90,90]
+      return { yaw, pitch };
+    }
+    function dirFromYawPitch(yawDeg,pitchDeg){
+      const y=yawDeg*D2R, p=pitchDeg*D2R;
+      const cp=cos(p), sp=sin(p), cy=cos(y), sy=sin(y);
+      return [cp*cy, sp, cp*sy]; // unit vector
     }
 
-    function dirFromYawPitch(yawDeg, pitchDeg){
-      const yaw = yawDeg * D2R, pitch = pitchDeg * D2R;
-      const cp = cos(pitch), sp = sin(pitch), cy = cos(yaw), sy = sin(yaw);
-      return [cp*cy, sp, cp*sy]; // unit direction
+    /* List artworks in /artworks (public repo) */
+    async function listArtworks(){
+      const r = await fetch(ARTWORKS_API,{cache:'no-store'});
+      if(!r.ok) throw new Error("GitHub API "+r.status);
+      const files = await r.json();
+      return files
+        .filter(f=>f.type==="file" && /\.(png|jpg|jpeg|webp)$/i.test(f.name))
+        .map(f=>{
+          const m=/^(\d+)\.(png|jpg|jpeg|webp)$/i.exec(f.name);
+          return { n:m?parseInt(m[1],10):null, name:f.name, url:f.download_url };
+        })
+        .filter(x=>Number.isFinite(x.n))
+        .sort((a,b)=>a.n-b.n);
     }
-
-    function listArtworks(){
-      return fetch(ARTWORKS_API, { cache:'no-store' })
-        .then(r => { if(!r.ok) throw new Error("GitHub API "+r.status); return r.json(); })
-        .then(files => files
-          .filter(f => f.type === "file" && /\.(png|jpg|jpeg|webp)$/i.test(f.name))
-          .map(f => {
-            const m = /^(\d+)\.(png|jpg|jpeg|webp)$/i.exec(f.name);
-            const n = m ? parseInt(m[1], 10) : null;
-            return { n, name: f.name, url: f.download_url };
-          })
-          .filter(x => Number.isFinite(x.n))
-          .sort((a,b) => a.n - b.n)
-        );
-    }
-
     function loadImage(src){
-      return new Promise((res, rej)=>{
-        const img = new Image();
-        img.crossOrigin = "anonymous";
-        img.onload = () => res(img);
-        img.onerror = () => rej(new Error("img "+src));
-        img.src = src;
+      return new Promise((res,rej)=>{
+        const img=new Image();
+        img.crossOrigin="anonymous";
+        img.onload=()=>res(img);
+        img.onerror=()=>rej(new Error("img "+src));
+        img.src=src;
       });
     }
 
-    // Compute artwork plane placement from its index
-    function placementForIndex(i, total, aspect){
-      // evenly spaced around 360°
-      const yaw = normYawDeg(-180 + (i + 0.5) * (360 / total) + LAYOUT.yawOffsetDeg);
-      const pitch = LAYOUT.pitchDeg; // center on equator
-      // Convert desired angular height to world height on a plane at distance R.
-      // Small-angle derivation: deltaPitch ≈ 2*atan((h/2)/R)  =>  h ≈ 2*R*tan(delta/2)
-      const hWorld = 2 * R * Math.tan((ART_HEIGHT_DEG * D2R)/2);
-      const wWorld = hWorld * aspect;
+    /* -------------------- Walls (planes) --------------------
+       We define 4 walls:
+       West  wall: x = -HALF_W, normal ( +1,0,0 )
+       East  wall: x = +HALF_W, normal ( -1,0,0 )
+       North wall: z = -HALF_D, normal ( 0,0,+1 )
+       South wall: z = +HALF_D, normal ( 0,0,-1 )
 
-      // Plane normal faces the camera
-      const n = [cos(yaw*D2R), 0, sin(yaw*D2R)];              // inward normal
-      const u = [-sin(yaw*D2R), 0, cos(yaw*D2R)];             // horizontal axis along wall
-      const v = [0, 1, 0];                                    // vertical axis
-      const P0 = [n[0]*R, 0, n[2]*R];                         // a point on plane (center height 0)
-      const C  = [P0[0], 0, P0[2]];                           // center of artwork at y=0
+       For each wall we also define a local 'u' axis (to the right along the wall)
+       and a local 'v' axis (up).
+    ---------------------------------------------------------*/
+    const WALLS = [
+      { id:"west",  n:[+1,0,0],  u:[0,0,+1], v:[0,1,0], point:[-HALF_W,0,0],  span: ROOM.depth }, // along z
+      { id:"east",  n:[-1,0,0],  u:[0,0,-1], v:[0,1,0], point:[+HALF_W,0,0],  span: ROOM.depth },
+      { id:"north", n:[0,0,+1],  u:[+1,0,0], v:[0,1,0], point:[0,0,-HALF_D], span: ROOM.width }, // along x
+      { id:"south", n:[0,0,-1],  u:[-1,0,0], v:[0,1,0], point:[0,0,+HALF_D], span: ROOM.width }
+    ];
 
-      return { yaw, pitch, n, u, v, C, wWorld, hWorld };
+    /* Distribute artworks around walls, left→right along each wall at HANG_Y.
+       You can replace this with your own placement table if you want precise positions. */
+    function autoPlace(files, aspects){
+      // simple round-robin by wall; pack along each wall with uniform spacing
+      const perWall = Math.ceil(files.length / WALLS.length);
+      const placements = [];
+      let idx = 0;
+
+      for (let w=0; w<WALLS.length && idx<files.length; w++){
+        const wall = WALLS[w];
+        const count = Math.min(perWall, files.length - idx);
+        if (count <= 0) break;
+
+        // leave 0.8 m margin at both ends
+        const margin = 0.8;
+        const usable = wall.span - 2*margin;
+        for (let j=0; j<count; j++, idx++){
+          const f = files[idx];
+          const aspect = aspects[idx];
+          // artwork dimensions (meters), preserve aspect and clamp width
+          let h = ART_SIZE_M.height;
+          let wMeter = Math.min(ART_SIZE_M.maxWidth, h * aspect);
+
+          // lateral coordinate along wall (centered slots)
+          const t = (j + 0.5) / count;                    // 0..1
+          const along = -usable/2 + margin + t * usable;  // meters
+
+          // center position on wall plane in world coords:
+          // Pcenter = wall.point + along*wall.u + HANG_Y*wall.v
+          const Pcx = wall.point[0] + along*wall.u[0] + HANG_Y*wall.v[0];
+          const Pcy = wall.point[1] + along*wall.u[1] + HANG_Y*wall.v[1];
+          const Pcz = wall.point[2] + along*wall.u[2] + HANG_Y*wall.v[2];
+
+          // rectangle half-extends in local u/v
+          const hw = wMeter/2, hh = h/2;
+
+          placements.push({
+            file: f,
+            wallIndex: w,
+            // plane definition:
+            n: wall.n.slice(), u: wall.u.slice(), v: wall.v.slice(),
+            C: [Pcx, Pcy, Pcz],   // center point
+            hw, hh,               // half sizes in meters
+            // for hotspot yaw/pitch (use center ray)
+            centerYawPitch: yawPitchFromPoint(Pcx, Pcy-ROOM.eyeY, Pcz)
+          });
+        }
+      }
+      return placements;
     }
 
-    // Build a conservative yaw/pitch ROI around the artwork to limit per-pixel work
-    function roiForArtwork(place){
-      const dYaw = Math.atan((place.wWorld/2)/R) * R2D + ROI_MARGIN_DEG; // approximate
-      const dPit = ART_HEIGHT_DEG/2 + ROI_MARGIN_DEG;
-      return {
-        yawMin: normYawDeg(place.yaw - dYaw),
-        yawMax: normYawDeg(place.yaw + dYaw),
-        pitchMin: place.pitch - dPit,
-        pitchMax: place.pitch + dPit
-      };
+    /* ROI (yaw/pitch bounds) from the 4 projected corners (with margin) */
+    function roiFromRect(C, u, v, hw, hh){
+      const corners = [
+        [C[0] - hw*u[0] - hh*v[0], C[1] - hw*u[1] - hh*v[1], C[2] - hw*u[2] - hh*v[2]],
+        [C[0] + hw*u[0] - hh*v[0], C[1] + hw*u[1] - hh*v[1], C[2] + hw*u[2] - hh*v[2]],
+        [C[0] - hw*u[0] + hh*v[0], C[1] - hw*u[1] + hh*v[1], C[2] - hw*u[2] + hh*v[2]],
+        [C[0] + hw*u[0] + hh*v[0], C[1] + hw*u[1] + hh*v[1], C[2] + hw*u[2] + hh*v[2]]
+      ];
+      // subtract eye position (0, eyeY, 0) to build the rays
+      const yShifted = corners.map(p => yawPitchFromPoint(p[0], p[1]-ROOM.eyeY, p[2]));
+      let yawMin = +180, yawMax = -180, pitchMin = +90, pitchMax = -90;
+      yShifted.forEach(a => {
+        yawMin   = Math.min(yawMin, a.yaw);
+        yawMax   = Math.max(yawMax, a.yaw);
+        pitchMin = Math.min(pitchMin, a.pitch);
+        pitchMax = Math.max(pitchMax, a.pitch);
+      });
+      // Expand a bit
+      yawMin   = normYawDeg(yawMin - ROI_MARGIN_DEG);
+      yawMax   = normYawDeg(yawMax + ROI_MARGIN_DEG);
+      pitchMin -= ROI_MARGIN_DEG;
+      pitchMax += ROI_MARGIN_DEG;
+      return { yawMin, yawMax, pitchMin, pitchMax };
     }
 
-    function inYawRange(yaw, minYaw, maxYaw){
-      // handle seam [-180,180]: choose the smaller arc between min and max
-      const a = normYawDeg(yaw - minYaw);
-      const b = normYawDeg(maxYaw - minYaw);
-      if (b < 0) return false;
-      // When range crosses seam, b may be small negative if not normalized; ensure positive
-      const span = (b+360)%360;
-      const pos = (a+360)%360;
-      return pos <= span;
+    /* Check if yaw is inside [min,max] on a circular range */
+    function yawInRange(yaw, minYaw, maxYaw){
+      // handle wrap around -180..180
+      const width = ( (maxYaw - minYaw + 360) % 360 );
+      const pos   = ( (yaw    - minYaw + 360) % 360 );
+      return pos <= width;
     }
 
-    // Alpha blend src over dst in place
+    /* Alpha blend src over dst in place */
     function blend(dst, di, sr, sg, sb, sa){
-      const a = sa / 255;
+      const a = sa/255;
       const ia = 1 - a;
-      dst[di    ] = Math.round(sr * a + dst[di    ] * ia);
-      dst[di + 1] = Math.round(sg * a + dst[di + 1] * ia);
-      dst[di + 2] = Math.round(sb * a + dst[di + 2] * ia);
-      dst[di + 3] = Math.round(255 * (a + (dst[di + 3]/255) * ia));
+      dst[di    ] = Math.round(sr*a + dst[di    ]*ia);
+      dst[di + 1] = Math.round(sg*a + dst[di + 1]*ia);
+      dst[di + 2] = Math.round(sb*a + dst[di + 2]*ia);
+      dst[di + 3] = Math.round(255*(a + (dst[di + 3]/255)*ia));
     }
 
     async function bakeComposite(){
-      // Load pano + list + artwork images
+      // load base pano + file list + images
       const [panoImg, files] = await Promise.all([ loadImage(PANO_URL_RAW), listArtworks() ]);
       const artImgs = await Promise.all(files.map(f => loadImage(f.url)));
+      const aspects = artImgs.map(im => (im.naturalWidth || 1)/(im.naturalHeight || 1));
 
-      // Prepare destination canvas
+      // compute placements on walls (meters)
+      const placements = autoPlace(files, aspects);
+
+      // canvas setup
       const W = panoImg.naturalWidth;
       const H = panoImg.naturalHeight;
-      const cvs = el('#bake'); cvs.width = W; cvs.height = H;
+      const cvs = el('#bake'); cvs.width=W; cvs.height=H;
       const ctx = cvs.getContext('2d');
       ctx.drawImage(panoImg, 0, 0, W, H);
+
       const dest = ctx.getImageData(0, 0, W, H);
       const D = dest.data;
 
-      // For each artwork, compute placement and paint into dest image
-      const items = [];
-      for (let i=0; i<files.length; i++){
-        const meta = files[i];
-        const img = artImgs[i];
-        const aspect = img.naturalWidth / img.naturalHeight;
-        const place = placementForIndex(i, files.length, aspect);
-        const roi = roiForArtwork(place);
+      // prepare per-artwork samplers
+      const samplers = artImgs.map(img => {
+        const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight;
+        const cctx = c.getContext('2d'); cctx.drawImage(img,0,0);
+        return { w:c.width, h:c.height, data: cctx.getImageData(0,0,c.width,c.height).data };
+      });
 
-        // For the hotspot later
-        items.push({
-          number: String(meta.n),
-          yaw: place.yaw,
-          pitch: place.pitch,
-          url: meta.url,
-          wPx: HOTSPOT_BASE_PX.w,
-          hPx: HOTSPOT_BASE_PX.h
-        });
+      // For each artwork, raycast within its yaw/pitch ROI and blend pixels
+      for (let i=0; i<placements.length; i++){
+        const P = placements[i];
+        const S = samplers[i];
 
-        // Build a quick sampler for the artwork
-        const sCvs = document.createElement('canvas');
-        sCvs.width = img.naturalWidth; sCvs.height = img.naturalHeight;
-        const sCtx = sCvs.getContext('2d');
-        sCtx.drawImage(img, 0, 0);
-        const sData = sCtx.getImageData(0, 0, sCvs.width, sCvs.height).data;
+        const roi = roiFromRect(P.C, P.u, P.v, P.hw, P.hh);
 
-        // Convenience locals
-        const n = place.n, u = place.u, v = place.v, C = place.C;
-        const hw = place.wWorld / 2, hh = place.hWorld / 2;
-
-        // Convert ROI degrees -> pixel rows / columns
-        // Yaw span may cross seam; we won't convert to columns directly.
+        // compute y pixel bounds from pitch bounds
         const yMin = Math.max(0, Math.floor((90 - roi.pitchMax) / 180 * H));
         const yMax = Math.min(H-1, Math.ceil((90 - roi.pitchMin) / 180 * H));
 
-        for (let y = yMin; y <= yMax; y++){
-          const pitch = 90 - (y + 0.5) * 180 / H;      // center-of-pixel
-          for (let x = 0; x < W; x++){
+        // precompute plane denom for intersection: n·(O + t*d - anyPoint) = 0
+        // with O = (0,eyeY,0), plane point C (center), normal n -> t = n·(C - O) / (n·d)
+        const CminusO = [ P.C[0], P.C[1]-ROOM.eyeY, P.C[2] ];
+        const n_dot_CminusO = P.n[0]*CminusO[0] + P.n[1]*CminusO[1] + P.n[2]*CminusO[2];
+
+        for (let y=yMin; y<=yMax; y++){
+          const pitch = 90 - (y + 0.5) * 180 / H;
+          for (let x=0; x<W; x++){
             const yaw = (x + 0.5) * 360 / W - 180;
-            if (!inYawRange(yaw, roi.yawMin, roi.yawMax)) continue;
+            if (!yawInRange(yaw, roi.yawMin, roi.yawMax)) continue;
 
-            // Ray direction for this pano pixel
+            // ray direction from eye through this pano pixel
             const d = dirFromYawPitch(yaw, pitch); // [dx,dy,dz]
+            const n_dot_d = P.n[0]*d[0] + P.n[1]*d[1] + P.n[2]*d[2];
+            if (n_dot_d <= 1e-6) continue; // pointing away or parallel
 
-            // Plane intersection: n·(t*d) = R  => t = R / (n·d)
-            const nd = n[0]*d[0] + n[1]*d[1] + n[2]*d[2];
-            if (nd <= 1e-6) continue;             // looking away / parallel
+            const t = n_dot_CminusO / n_dot_d;
+            if (t <= 0) continue; // behind the eye
 
-            const t = R / nd;
-            const Hx = d[0]*t, Hy = d[1]*t, Hz = d[2]*t;   // hit point on plane
-            // Vector from artwork center
-            const rx = Hx - C[0], ry = Hy - C[1], rz = Hz - C[2];
+            // intersection point H = O + t*d  (O=0,eyeY,0)
+            const Hx = t*d[0];
+            const Hy = ROOM.eyeY + t*d[1];
+            const Hz = t*d[2];
 
-            // Local coordinates (u to right, v up)
-            const cu = rx*u[0] + ry*u[1] + rz*u[2];
-            const cv = rx*v[0] + ry*v[1] + rz*v[2];
+            // vector from artwork center to hit point
+            const rx = Hx - P.C[0], ry = Hy - P.C[1], rz = Hz - P.C[2];
 
-            if (abs(cu) > hw || abs(cv) > hh) continue; // outside rect
+            // local coordinates in artwork's (u,v) basis (u: right, v: up)
+            const cu = rx*P.u[0] + ry*P.u[1] + rz*P.u[2];
+            const cv = rx*P.v[0] + ry*P.v[1] + rz*P.v[2];
 
-            // Map to artwork pixel (0..w-1, 0..h-1), origin top-left
-            const uu = (cu + hw) / (2*hw);            // 0..1
-            const vv = (hh - cv) / (2*hh);            // 0..1 (flip y)
+            if (abs(cu) > P.hw || abs(cv) > P.hh) continue; // outside rectangle
 
-            const sx = Math.min(sCvs.width - 1, Math.max(0, Math.floor(uu * sCvs.width)));
-            const sy = Math.min(sCvs.height - 1, Math.max(0, Math.floor(vv * sCvs.height)));
-            const si = (sy * sCvs.width + sx) * 4;
+            // map to sampler texel (0..w-1, 0..h-1), origin top-left
+            const uu = (cu + P.hw) / (2*P.hw);     // 0..1
+            const vv = (P.hh - cv) / (2*P.hh);     // 0..1 (flip y)
+            const sx = Math.min(S.w-1, Math.max(0, Math.floor(uu * S.w)));
+            const sy = Math.min(S.h-1, Math.max(0, Math.floor(vv * S.h)));
+            const si = (sy * S.w + sx) * 4;
 
-            const r = sData[si], g = sData[si+1], b = sData[si+2], a = sData[si+3];
+            const r = S.data[si], g = S.data[si+1], b = S.data[si+2], a = S.data[si+3];
             if (a === 0) continue;
 
             const di = (y * W + x) * 4;
-            // Optional soft border/shadow: draw after blend for a subtle frame (skip for transparent pixels)
             blend(D, di, r, g, b, a);
           }
         }
 
-        // Optional frame (simple white stroke + shadow) — approximate by re-painting edges in pano space.
-        if (FRAME.enabled){
-          // draw a thin expanded area by sampling the same rect with a 1px dilation in local coords
-          // (cheap way to give a crisp border)
-          const borderPx = 2; // pano-pixel thickness
-          const expand = 1 + (borderPx / Math.max(W, H)) * 360 / (2*R2D); // tiny angular expansion
-          // we just repeat the loop but sample a solid color at edges
-          const yMin2 = yMin, yMax2 = yMax;
-          for (let y = yMin2; y <= yMax2; y++){
+        // Simple crisp border (optional)
+        if (FRAME.enabled && FRAME.borderPx > 0){
+          // draw a 1D dilation around edges by sampling local coords near the rectangle edges
+          const borderColor = FRAME.border; // expects rgba(r,g,b,a)
+          const m = /rgba\((\d+),\s*(\d+),\s*(\d+),\s*([0-9.]+)\)/.exec(borderColor);
+          const rr = m?parseInt(m[1],10):255, gg=m?parseInt(m[2],10):255, bb=m?parseInt(m[3],10):255, aa=m?Math.round(parseFloat(m[4])*255):220;
+
+          const bpx = FRAME.borderPx;
+          const yMin2 = Math.max(0, Math.floor((90 - (roi.pitchMax+0.5)) / 180 * H));
+          const yMax2 = Math.min(H-1, Math.ceil((90 - (roi.pitchMin-0.5)) / 180 * H));
+          for (let y=yMin2; y<=yMax2; y++){
             const pitch = 90 - (y + 0.5) * 180 / H;
-            for (let x = 0; x < W; x++){
+            for (let x=0; x<W; x++){
               const yaw = (x + 0.5) * 360 / W - 180;
-              if (!inYawRange(yaw, roi.yawMin, roi.yawMax)) continue;
+              if (!yawInRange(yaw, roi.yawMin, roi.yawMax)) continue;
               const d = dirFromYawPitch(yaw, pitch);
-              const nd = n[0]*d[0] + n[1]*d[1] + n[2]*d[2];
-              if (nd <= 1e-6) continue;
-              const t = R / nd;
-              const Hx = d[0]*t, Hy = d[1]*t, Hz = d[2]*t;
-              const rx = Hx - C[0], ry = Hy - C[1], rz = Hz - C[2];
-              const cu = rx*u[0] + ry*u[1] + rz*u[2];
-              const cv = rx*v[0] + ry*v[1] + rz*v[2];
-              if (abs(cu) > hw || abs(cv) > hh) continue;
-              const nearEdge = (Math.abs(abs(cu) - hw) < (hw * 0.02)) || (Math.abs(abs(cv) - hh) < (hh * 0.02));
-              if (!nearEdge) continue;
+              const n_dot_d = P.n[0]*d[0] + P.n[1]*d[1] + P.n[2]*d[2];
+              if (n_dot_d <= 1e-6) continue;
+              const t = n_dot_CminusO / n_dot_d;
+              if (t <= 0) continue;
+
+              const Hx = t*d[0], Hy = ROOM.eyeY + t*d[1], Hz = t*d[2];
+              const rx = Hx - P.C[0], ry = Hy - P.C[1], rz = Hz - P.C[2];
+              const cu = rx*P.u[0] + ry*P.u[1] + rz*P.u[2];
+              const cv = rx*P.v[0] + ry*P.v[1] + rz*P.v[2];
+              if (abs(cu) > P.hw || abs(cv) > P.hh) continue;
+              // near edge?
+              const edge = Math.min(P.hw - abs(cu), P.hh - abs(cv));
+              if (edge > Math.max(P.hw, P.hh)*0.02) continue; // 2% band
               const di = (y * W + x) * 4;
-              const col = FRAME.border; // rgba(...)
-              // parse rgba quickly:
-              const m = /rgba\((\d+),\s*(\d+),\s*(\d+),\s*([0-9.]+)\)/.exec(col);
-              const rr = m?parseInt(m[1],10):255, gg=m?parseInt(m[2],10):255, bb=m?parseInt(m[3],10):255, aa=m?Math.round(parseFloat(m[4])*255):220;
               blend(D, di, rr, gg, bb, aa);
             }
           }
         }
       }
 
+      // commit baked pixels
       ctx.putImageData(dest, 0, 0);
-      // Create a blob URL for pannellum
+
+      // export blob URL for pannellum
       const blob = await new Promise(res => cvs.toBlob(res, "image/png", 0.95));
-      return { url: URL.createObjectURL(blob), items };
+      const url = URL.createObjectURL(blob);
+
+      // return hotspot centers for clicks
+      const items = placements.map((P,i) => ({
+        number: String(placements[i].file.n),
+        yaw:    placements[i].centerYawPitch.yaw,
+        pitch:  placements[i].centerYawPitch.pitch,
+        url:    placements[i].file.url,
+        w: HOTSPOT_BASE_PX.w,
+        h: HOTSPOT_BASE_PX.h
+      }));
+
+      return { url, items };
     }
 
     function startViewer(panoUrl, items){
@@ -299,8 +370,7 @@
       });
 
       viewer.on('load', () => {
-        // add transparent clickable areas at the same yaw/pitch
-        items.forEach((a, i) => {
+        items.forEach(a => {
           viewer.addHotSpot({
             yaw: a.yaw,
             pitch: a.pitch,
@@ -316,12 +386,7 @@
                 if(e.key==='Enter' || e.key===' '){ e.preventDefault(); openCard(args); }
               });
             },
-            createTooltipArgs: {
-              number: a.number,
-              title:  "",
-              imageUrl: a.url,
-              w: a.wPx, h: a.hPx
-            }
+            createTooltipArgs: { number:a.number, url:a.url, w:a.w, h:a.h }
           });
         });
         toast('Gallery loaded');
@@ -330,14 +395,14 @@
       viewer.on('error', e => { console.error(e); toast('Pannellum error'); });
 
       function openCard(a){
-        // Replace with your nicer card UI if you want
-        alert('Artwork #' + a.number);
+        // Minimal demo card; replace with your nicer UI if you want
+        alert('Artwork #'+a.number);
       }
     }
 
     (async function main(){
       try{
-        toast('Baking artworks onto walls…');
+        toast('Baking artworks onto 10×10 m walls…');
         const { url, items } = await bakeComposite();
         toast('Starting viewer…');
         startViewer(url, items);
