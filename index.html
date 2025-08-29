@@ -3,25 +3,28 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Six-Plane Room → Equirectangular</title>
+<title>Six-Plane Room → Equirectangular (Debug)</title>
 
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css">
 <script src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js"></script>
 
 <style>
   html,body{height:100%;margin:0;background:#0b0d10;color:#e7ecf2;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
-  header{padding:10px 14px;background:#12151a;border-bottom:1px solid #1e2230;display:flex;gap:12px;align-items:center}
+  header{padding:10px 14px;background:#12151a;border-bottom:1px solid #1e2230;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
   header h1{margin:0;font-size:16px;font-weight:600}
-  header .hint{opacity:.75;font-size:13px}
-  #viewer{height:calc(100vh - 48px)}
+  header .hint{opacity:.8;font-size:13px}
+  #viewer{height:calc(100vh - 60px)}
   #bake{display:none}
   .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:20px;background:#0f141b;color:#d4ddea;padding:10px 14px;border-radius:10px;font-size:13px;border:1px solid #223148;display:none;z-index:30}
+  .warn{padding:6px 10px;background:#332; border:1px solid #633; border-radius:8px; font-size:12px; margin-left:auto}
+  code{background:#111319;border:1px solid #1d2331;padding:2px 6px;border-radius:6px}
 </style>
 </head>
 <body>
   <header>
     <h1>Six-Plane Room → Equirectangular</h1>
-    <div class="hint">Uses only walls/{north,south,east,west,floor,roof}.png — no base pano.</div>
+    <div class="hint">Picks up <code>walls/{north,south,east,west,floor,roof}.png</code>. Includes solid-color debug cube and verbose logs.</div>
+    <div id="warn" class="warn" style="display:none"></div>
   </header>
 
   <div id="viewer"></div>
@@ -41,65 +44,39 @@ const WALLS_API = `https://api.github.com/repos/${GH_USER}/${GH_REPO}/contents/w
 const ROOM = { width: 10.0, depth: 10.0, height: 3.0, eyeY: 1.6 };
 
 /* Rotate whole room to align with your pano orientation (if needed) */
-const GLOBAL_YAW_DEG = 0;          // try 90 / -90 / 180 if directions feel rotated
+const GLOBAL_YAW_DEG = 0;          // try 90 / -90 / 180 if rotated
 
-/* Vertical shift of the whole room (if you need to nudge floor/ceiling alignment) */
+/* Vertical shift of the whole room (if you need to nudge alignment) */
 const SHIFT_Y_M = 0.0;             // negative lowers everything
 
 /* Output panorama size and quality */
-const OUTPUT = { width: 4096, height: 2048 }; // increase (e.g. 8000×4000) for crisper
+const OUTPUT = { width: 4096, height: 2048 };  // increase (e.g. 8000×4000) for crisper
 const SUPERSAMPLE = 1.5;            // render at 1.5× then downscale (1.0 = off)
 const USE_BILINEAR = true;          // smooth sampling
-const BACKGROUND_RGBA = [11,13,16,255]; // fill color behind everything
+const BACKGROUND_RGBA = [11,13,16,255]; // behind everything
 
 /* ROI slack to speed up baking */
 const ROI_MARGIN_DEG = 2.0;
+
+/* DEBUG: force solid-color cube even if textures exist */
+const FORCE_SOLID_DEBUG = false;
 /* =================================================== */
 
 const el = q => document.querySelector(q);
 function toast(msg,ms=2000){ const t=el('#toast'); t.textContent=msg; t.style.display='block'; clearTimeout(toast._h); toast._h=setTimeout(()=>t.style.display='none',ms); }
+function warn(msg){ const w=el('#warn'); w.textContent=msg; w.style.display='inline-block'; }
 
+/* -------- math helpers -------- */
 const D2R=Math.PI/180, R2D=180/Math.PI;
 const sin=Math.sin, cos=Math.cos, atan2=Math.atan2, asin=Math.asin, abs=Math.abs;
 
-async function listPngs(folderApi){
-  const r = await fetch(folderApi, { cache:'no-store' });
-  if(!r.ok){ if(r.status===404) return []; throw new Error("GitHub API "+r.status); }
-  const files = await r.json();
-  return files.filter(f=>f.type==="file" && /\.png$/i.test(f.name))
-              .map(f=>({ name:f.name.toLowerCase(), url:f.download_url }));
-}
-function loadImage(src){
-  return new Promise((res,rej)=>{
-    const img=new Image(); img.crossOrigin="anonymous";
-    img.onload=()=>res(img); img.onerror=()=>rej(new Error("img "+src));
-    img.src=src;
-  });
-}
-
-/* ---------- Math helpers ---------- */
-function yawPitchFromPoint(px,py,pz){
-  const L = Math.hypot(px,py,pz);
-  return { yaw: atan2(pz, px) * R2D, pitch: asin(py / L) * R2D };
-}
-function dirFromYawPitch(yawDeg,pitchDeg){
-  const y=yawDeg*D2R, p=pitchDeg*D2R;
-  const cp=Math.cos(p), sp=Math.sin(p), cy=Math.cos(y), sy=Math.sin(y);
-  return [cp*cy, sp, cp*sy];
-}
-function rotateY(v, yawDeg){
-  const y=yawDeg*D2R, c=Math.cos(y), s=Math.sin(y);
-  const x=v[0], z=v[2];
-  return [c*x + s*z, v[1], -s*x + c*z];
-}
+function yawPitchFromPoint(px,py,pz){ const L=Math.hypot(px,py,pz); return { yaw: atan2(pz, px)*R2D, pitch: asin(py/L)*R2D }; }
+function dirFromYawPitch(yawDeg,pitchDeg){ const y=yawDeg*D2R, p=pitchDeg*D2R; const cp=Math.cos(p), sp=Math.sin(p), cy=Math.cos(y), sy=Math.sin(y); return [cp*cy, sp, cp*sy]; }
+function rotateY(v, yawDeg){ const y=yawDeg*D2R, c=Math.cos(y), s=Math.sin(y); const x=v[0], z=v[2]; return [c*x + s*z, v[1], -s*x + c*z]; }
 function add(a,b){ return [a[0]+b[0], a[1]+b[1], a[2]+b[2]]; }
 function mul(a,k){ return [a[0]*k, a[1]*k, a[2]*k]; }
 function normYawDeg(a){ return ((a+180)%360+360)%360-180; }
-function yawInRange(yaw, minYaw, maxYaw){
-  const width = ((maxYaw - minYaw + 360) % 360);
-  const pos   = ((yaw    - minYaw + 360) % 360);
-  return pos <= width;
-}
+function yawInRange(yaw, minYaw, maxYaw){ const width=((maxYaw-minYaw+360)%360); const pos=((yaw-minYaw+360)%360); return pos<=width; }
 function roiFromRect(C,u,v,hu,hv){
   const corners = [
     add(add(C, mul(u,-hu)), mul(v,-hv)),
@@ -115,7 +92,7 @@ function roiFromRect(C,u,v,hu,hv){
   return { yawMin,yawMax,pitchMin,pitchMax };
 }
 
-/* ---------- Sampling ---------- */
+/* -------- sampling -------- */
 function sampleBilinear(S, sw, sh, u, v){
   const fx = Math.max(0, Math.min(sw-1, u * (sw-1)));
   const fy = Math.max(0, Math.min(sh-1, v * (sh-1)));
@@ -132,34 +109,37 @@ function sampleBilinear(S, sw, sh, u, v){
 
   return [ Math.round(lerp(r0, r1, dy)), Math.round(lerp(g0, g1, dy)), Math.round(lerp(b0, b1, dy)), Math.round(lerp(a0, a1, dy)) ];
 }
-function blend(dst, di, r,g,b,a){
-  const af = a/255, ia = 1-af;
-  dst[di]   = Math.round(r*af + dst[di]*ia);
-  dst[di+1] = Math.round(g*af + dst[di+1]*ia);
-  dst[di+2] = Math.round(b*af + dst[di+2]*ia);
-  dst[di+3] = Math.round(255*(af + (dst[di+3]/255)*ia));
+function blend(dst, di, r,g,b,a){ const af=a/255, ia=1-af; dst[di]=Math.round(r*af+dst[di]*ia); dst[di+1]=Math.round(g*af+dst[di+1]*ia); dst[di+2]=Math.round(b*af+dst[di+2]*ia); dst[di+3]=Math.round(255*(af+(dst[di+3]/255)*ia)); }
+
+/* -------- repo helpers -------- */
+async function listPngs(folderApi){
+  const r = await fetch(folderApi, { cache:'no-store' });
+  if(!r.ok){ if(r.status===404) return []; throw new Error("GitHub API "+r.status); }
+  const files = await r.json();
+  return files.filter(f=>f.type==="file" && /\.png$/i.test(f.name))
+              .map(f=>({ name:f.name.toLowerCase(), url:f.download_url }));
+}
+function loadImage(src){
+  return new Promise((res,rej)=>{
+    const img=new Image(); img.crossOrigin="anonymous";
+    img.onload=()=>res(img); img.onerror=()=>rej(new Error("img "+src));
+    img.src=src;
+  });
 }
 
-/* ---------- Define 6 planes, then rotate/shift as needed ---------- */
+/* -------- planes -------- */
 function buildPlanes(){
   const hw = ROOM.width/2, hd = ROOM.depth/2, hh = ROOM.height/2;
 
-  // Walls: (centered at mid-height); Floor/Roof: full extents
   const planes = [
-    // id,        normal,     u-axis,       v-axis,       point on plane,        halfU, halfV, png name
-    { id:"west",  n:[+1,0,0], u:[0,0,+1],  v:[0,1,0],    p:[-hw, hh, 0],        hu:hd, hv:hh, png:"west.png"  }, // spans z & y
-    { id:"east",  n:[-1,0,0], u:[0,0,-1],  v:[0,1,0],    p:[+hw, hh, 0],        hu:hd, hv:hh, png:"east.png"  },
-    { id:"north", n:[0,0,+1], u:[+1,0,0],  v:[0,1,0],    p:[0, hh, -hd],        hu:hw, hv:hh, png:"north.png" },
-    { id:"south", n:[0,0,-1], u:[-1,0,0],  v:[0,1,0],    p:[0, hh, +hd],        hu:hw, hv:hh, png:"south.png" },
-
-    // Floor: y=0 plane (u along +x (west→east), v along +z (north→south))
-    { id:"floor", n:[0,1,0],  u:[+1,0,0],  v:[0,0,+1],   p:[0, 0, 0],           hu:hw, hv:hd, png:"floor.png" },
-
-    // Roof/Ceiling: y=height plane (same u/v mapping as floor)
-    { id:"roof",  n:[0,-1,0], u:[+1,0,0],  v:[0,0,+1],   p:[0, ROOM.height, 0], hu:hw, hv:hd, png:"roof.png"  }
+    { id:"west",  n:[+1,0,0], u:[0,0,+1],  v:[0,1,0],    p:[-hw, hh, 0],        hu:hd, hv:hh, png:"west.png",  debug:[200,60,60,255]  },
+    { id:"east",  n:[-1,0,0], u:[0,0,-1],  v:[0,1,0],    p:[+hw, hh, 0],        hu:hd, hv:hh, png:"east.png",  debug:[60,200,60,255]  },
+    { id:"north", n:[0,0,+1], u:[+1,0,0],  v:[0,1,0],    p:[0, hh, -hd],        hu:hw, hv:hh, png:"north.png", debug:[60,60,200,255]  },
+    { id:"south", n:[0,0,-1], u:[-1,0,0],  v:[0,1,0],    p:[0, hh, +hd],        hu:hw, hv:hh, png:"south.png", debug:[200,200,60,255] },
+    { id:"floor", n:[0,1,0],  u:[+1,0,0],  v:[0,0,+1],   p:[0, 0, 0],           hu:hw, hv:hd, png:"floor.png", debug:[60,200,200,255] },
+    { id:"roof",  n:[0,-1,0], u:[+1,0,0],  v:[0,0,+1],   p:[0, ROOM.height, 0], hu:hw, hv:hd, png:"roof.png",  debug:[200,60,200,255] }
   ];
 
-  // Apply global yaw rotation + vertical shift
   return planes.map(pl=>{
     const n = rotateY(pl.n, GLOBAL_YAW_DEG);
     const u = rotateY(pl.u, GLOBAL_YAW_DEG);
@@ -170,13 +150,22 @@ function buildPlanes(){
   });
 }
 
-/* ---------- Bake the six planes ---------- */
+/* -------- bake -------- */
 async function bakeRoom(){
-  const wallFiles = await listPngs(WALLS_API);            
+  console.log("%cBaking…","color:#9cf");
+  const wallFiles = await listPngs(WALLS_API);
+  if (!wallFiles.length) {
+    warn("No /walls/*.png found — rendering debug cube.");
+  }
   const texMap = Object.create(null);
   wallFiles.forEach(f => texMap[f.name] = f.url);
 
-  // Setup output canvas (supersampled)
+  const need = ["north.png","south.png","east.png","west.png","floor.png","roof.png"];
+  need.forEach(n => {
+    const url = texMap[n];
+    console.log(url ? `✓ found ${n}: ${url}` : `✗ missing ${n}`);
+  });
+
   const W0 = OUTPUT.width, H0 = OUTPUT.height;
   const W = Math.max(1, Math.round(W0 * SUPERSAMPLE));
   const H = Math.max(1, Math.round(H0 * SUPERSAMPLE));
@@ -190,23 +179,86 @@ async function bakeRoom(){
 
   const planes = buildPlanes();
 
-  // Preload textures we actually have
+  // Preload textures
   const textures = {};
   for (const pl of planes){
     const url = texMap[pl.png];
     if (!url) continue;
-    const img = await loadImage(url);
-
-    const sc = document.createElement('canvas');
-    sc.width  = Math.max(1, Math.round(img.naturalWidth  * SUPERSAMPLE));
-    sc.height = Math.max(1, Math.round(img.naturalHeight * SUPERSAMPLE));
-    const sx = sc.getContext('2d');
-    sx.imageSmoothingEnabled = true;
-    sx.drawImage(img, 0,0, sc.width, sc.height);
-    textures[pl.id] = { w: sc.width, h: sc.height, data: sx.getImageData(0,0,sc.width,sc.height).data };
+    try{
+      const img = await loadImage(url);
+      const sc = document.createElement('canvas');
+      sc.width  = Math.max(1, Math.round(img.naturalWidth  * SUPERSAMPLE));
+      sc.height = Math.max(1, Math.round(img.naturalHeight * SUPERSAMPLE));
+      const sx = sc.getContext('2d');
+      sx.imageSmoothingEnabled = true;
+      sx.drawImage(img, 0,0, sc.width, sc.height);
+      textures[pl.id] = { w: sc.width, h: sc.height, data: sx.getImageData(0,0,sc.width,sc.height).data };
+      console.log(`✓ loaded ${pl.id} (${pl.png}) ${sc.width}×${sc.height}`);
+    }catch(e){
+      console.warn(`! failed to load ${pl.id} (${pl.png})`, e);
+    }
   }
 
-  // … [drawing loop unchanged] …
+  const useSolid = FORCE_SOLID_DEBUG || Object.keys(textures).length === 0;
+  if (useSolid){
+    warn("Using solid debug colors (no textures loaded). Check filenames/paths.");
+  }
+
+  // Draw each plane
+  for (const pl of planes){
+    const tex = textures[pl.id]; // may be undefined
+    if (!tex && !useSolid) continue;
+
+    const roi = roiFromRect(pl.p, pl.u, pl.v, pl.hu, pl.hv);
+    const yMin = Math.max(0, Math.floor((90 - roi.pitchMax) / 180 * H));
+    const yMax = Math.min(H-1, Math.ceil((90 - roi.pitchMin) / 180 * H));
+
+    const CminusO = [ pl.p[0], pl.p[1] - ROOM.eyeY, pl.p[2] ];
+    const n_dot_CminusO = pl.n[0]*CminusO[0] + pl.n[1]*CminusO[1] + pl.n[2]*CminusO[2];
+
+    for (let y=yMin; y<=yMax; y++){
+      const pitch = 90 - (y + 0.5) * 180 / H;
+      for (let x=0; x<W; x++){
+        const yaw = (x + 0.5) * 360 / W - 180;
+        if (!yawInRange(yaw, roi.yawMin, roi.yawMax)) continue;
+
+        const d = dirFromYawPitch(yaw, pitch);
+        const n_dot_d = pl.n[0]*d[0] + pl.n[1]*d[1] + pl.n[2]*d[2];
+        if (Math.abs(n_dot_d) <= 1e-6) continue;   // parallel rays
+
+        const t = n_dot_CminusO / n_dot_d;
+        if (t <= 0) continue;                      // behind eye
+
+        const Hx = t*d[0], Hy = ROOM.eyeY + t*d[1], Hz = t*d[2];
+        const rx = Hx - pl.p[0], ry = Hy - pl.p[1], rz = Hz - pl.p[2];
+
+        const cu = rx*pl.u[0] + ry*pl.u[1] + rz*pl.u[2];
+        const cv = rx*pl.v[0] + ry*pl.v[1] + rz*pl.v[2];
+        if (Math.abs(cu) > pl.hu || Math.abs(cv) > pl.hv) continue;
+
+        const di = (y * W + x) * 4;
+
+        if (tex){
+          const uu = (cu + pl.hu) / (2*pl.hu);
+          const vv = (pl.hv - cv) / (2*pl.hv);
+          let r,g,b,a;
+          if (USE_BILINEAR){
+            [r,g,b,a] = sampleBilinear(tex.data, tex.w, tex.h, uu, vv);
+          } else {
+            const sx = Math.min(tex.w-1, Math.max(0, Math.floor(uu * tex.w)));
+            const sy = Math.min(tex.h-1, Math.max(0, Math.floor(vv * tex.h)));
+            const si = (sy * tex.w + sx) * 4;
+            r=tex.data[si]; g=tex.data[si+1]; b=tex.data[si+2]; a=tex.data[si+3];
+          }
+          if (a === 0) continue;
+          blend(D, di, r,g,b,a);
+        } else if (useSolid){
+          const [r,g,b,a] = pl.debug;
+          blend(D, di, r,g,b,a);
+        }
+      }
+    }
+  }
 
   // Commit & downscale (SSAA)
   ctx0.putImageData(imgData, 0, 0);
@@ -218,18 +270,16 @@ async function bakeRoom(){
     fx.imageSmoothingEnabled = true;
     fx.drawImage(cvs, 0,0, W, H, 0,0, W0, H0);
 
-    // Replace bake canvas with the downscaled result
     cvs.width = W0; cvs.height = H0;
     const gx = cvs.getContext('2d');
     gx.drawImage(final, 0, 0);
   }
 
-  const blob = await new Promise(res => cvs.toBlob(res, "image/png", 0.95));
+  const blob = await new Promise(res => el('#bake').toBlob(res, "image/png", 0.95));
   return URL.createObjectURL(blob);
 }
 
-
-/* ---------- Start pannellum ---------- */
+/* -------- viewer -------- */
 function startViewer(panoUrl){
   pannellum.viewer('viewer', {
     type: 'equirectangular',
@@ -241,15 +291,16 @@ function startViewer(panoUrl){
   });
 }
 
-/* ---------- Go ---------- */
+/* -------- go -------- */
 (async function main(){
   try{
-    toast('Baking room from six PNGs…');
+    toast('Baking room (with debug)…');
     const url = await bakeRoom();
     toast('Starting viewer…');
     startViewer(url);
   }catch(err){
     console.error(err);
+    warn('Baking failed — open console for details.');
     toast('Failed to bake. Check /walls PNG names & that repo is public.');
   }
 })();
