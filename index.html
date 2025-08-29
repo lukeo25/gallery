@@ -15,13 +15,11 @@
     header { padding: 10px 14px; background: #12151a; border-bottom: 1px solid #1e2230; display: flex; gap: 12px; align-items: center; }
     header h1 { font-size: 16px; font-weight: 600; margin: 0; letter-spacing: .3px; }
     header .hint { opacity: .75; font-size: 13px; }
-    #panoc { height: calc(100vh - 48px); position: relative; }
 
-    /* Safety sizing if CDN CSS is slow */
+    #panoc { height: calc(100vh - 48px); position: relative; }
     .pnlm-container { position: relative; overflow: hidden; }
     .pnlm-render-container, .pnlm-render-canvas { width: 100%; height: 100%; display: block; }
 
-    /* Hotspot tiles */
     .art-slot {
       width: 180px; height: 120px;
       border: 4px solid rgba(255,255,255,.85);
@@ -38,7 +36,6 @@
       box-shadow: 0 4px 10px rgba(0,0,0,.45);
     }
 
-    /* Info card */
     .card-overlay {
       position: fixed; inset: auto 16px 16px auto; width: min(520px, calc(100% - 32px)); max-height: 80vh;
       border-radius: 14px; background: #0f141b; border: 1px solid #1e2633; box-shadow: 0 20px 60px rgba(0,0,0,.6);
@@ -87,15 +84,9 @@
   <div id="toast" class="toast"></div>
 
   <script>
-    /* ===== Your repo (NO placeholders) ===== */
-    const GH_USER = "lukeo25";
-    const GH_REPO = "gallery";
-
-    /* Pano uses a raw absolute URL so it never 404s due to relative paths */
-    const PANORAMA_URL = "https://raw.githubusercontent.com/lukeo25/gallery/refs/heads/main/gallery/gallery001.png";
-
-    /* We will list artwork via GitHub API, so no base path guessing needed */
-    const GITHUB_CONTENTS_API = `https://api.github.com/repos/${GH_USER}/${GH_REPO}/contents/artwork`;
+    /* ==== Paths in your repo (relative) ==== */
+    const PANORAMA_URL   = "gallery/gallery001.png";  // pano at repo/gallery/gallery001.png
+    const MANIFEST_URL   = "artwork/manifest.json";   // list of files to load from artwork/
 
     /* Layout */
     const LAYOUT = { rows: 1, pitchTopDeg: 3, pitchRowGapDeg: -12, yawOffsetDeg: 0 };
@@ -104,33 +95,6 @@
     function el(q){ return document.querySelector(q); }
     function toast(msg,ms=2600){ const t=el('#toast'); t.textContent=msg; t.style.display='block'; clearTimeout(toast._h); toast._h=setTimeout(()=>t.style.display='none',ms); }
     function escapeHtml(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-
-    function numFromFilename(name){
-      // expect '001.png', '023.jpg', etc.
-      const m = /^(\d+)\.(png|jpg|jpeg|webp)$/i.exec(name);
-      return m ? parseInt(m[1], 10) : null;
-    }
-
-    async function fetchArtworkList(){
-      // Get folder listing from GitHub API (CORS allowed, rate limit ~60/hr unauthenticated)
-      const res = await fetch(GITHUB_CONTENTS_API, { cache: 'no-store' });
-      if(!res.ok) throw new Error("GitHub API error " + res.status);
-      const files = await res.json();
-
-      // Keep only numbered image files and sort by number
-      const items = files
-        .filter(f => f.type === "file" && /\.(png|jpg|jpeg|webp)$/i.test(f.name))
-        .map(f => ({ number: numFromFilename(f.name), name: f.name, url: f.download_url }))
-        .filter(x => Number.isFinite(x.number))
-        .sort((a,b) => a.number - b.number)
-        .map(x => ({
-          number: String(x.number),
-          title:  "", artist: "", year: "", medium: "", dimensions: "", price: "", description: "",
-          imageUrl: x.url
-        }));
-
-      return items;
-    }
 
     function positionForIndex(i,total){
       const rows = Math.max(1, LAYOUT.rows|0);
@@ -160,16 +124,33 @@
       viewer.on('error', e => { console.error('Pannellum error:', e); toast('Error loading panorama'); });
 
       viewer.on('load', async () => {
-        try{
-          const items = await fetchArtworkList();
-          if(items.length === 0) toast("No images found in /artwork");
+        try {
+          const items = await fetchManifest();
           addArtHotspots(items);
           toast(`${items.length} artworks loaded`);
-        }catch(err){
-          console.error(err);
-          toast("Couldn't list /artwork via GitHub API");
+        } catch (e) {
+          console.error(e);
+          toast('Could not read artwork/manifest.json');
         }
       });
+    }
+
+    async function fetchManifest(){
+      const res = await fetch(MANIFEST_URL, { cache: 'no-store' });
+      if(!res.ok) throw new Error('manifest fetch ' + res.status);
+      const json = await res.json();
+      if(!json || !Array.isArray(json.files)) throw new Error('manifest malformed');
+
+      // Build item records from list; number derived from filename prefix
+      const items = json.files
+        .map(name => ({ name, number: parseInt((name.match(/^(\d+)/)||['',0])[1],10) || 0 }))
+        .sort((a,b)=>a.number-b.number)
+        .map(x => ({
+          number: String(x.number || x.name),
+          title: "", artist: "", year: "", medium: "", dimensions: "", price: "", description: "",
+          imageUrl: "artwork/" + x.name
+        }));
+      return items;
     }
 
     function slotRenderer(div, args){
