@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pannellum Art Gallery – Equirectangular Slots</title>
+  <script src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js"></script>
+  <style>
+    html, body { height: 100%; margin: 0; background: #0b0d10; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    #app { display: grid; grid-template-rows: auto 1fr; height: 100%; }
+    header { padding: 10px 14px; color: #e7ecf2; background: #12151a; border-bottom: 1px solid #1e2230; display: flex; gap: 12px; align-items: center; }
+    header h1 { font-size: 16px; font-weight: 600; margin: 0; letter-spacing: .3px; }
+    header .hint { opacity: .7; font-size: 13px; }
+
+    #panoc { position: relative; height: 100%; }
+
+    .art-slot {
+      width: 180px;
+      height: 120px;
+      border: 4px solid rgba(255,255,255,.85);
+      box-shadow: 0 6px 20px rgba(0,0,0,.45), inset 0 0 0 1px rgba(0,0,0,.25);
+      border-radius: 6px;
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
+      cursor: pointer;
+      transition: transform .15s ease, box-shadow .15s ease;
+    }
+    .art-slot:hover { transform: translateY(-2px) scale(1.02); box-shadow: 0 10px 24px rgba(0,0,0,.55), inset 0 0 0 1px rgba(0,0,0,.25); }
+    .art-slot::after{
+      content: attr(data-artno);
+      position: absolute; right: -10px; top: -10px; width: 28px; height: 28px; border-radius: 999px;
+      display: grid; place-items: center; background: #111923; color: #e7ecf2; font-size: 12px; border: 2px solid #3a4a63;
+      box-shadow: 0 4px 10px rgba(0,0,0,.45);
+    }
+
+    .card-overlay {
+      position: fixed;
+      inset: auto 16px 16px auto;
+      width: min(480px, calc(100% - 32px));
+      max-height: 80vh;
+      border-radius: 14px;
+      background: #0f141b;
+      border: 1px solid #1e2633;
+      box-shadow: 0 20px 60px rgba(0,0,0,.6);
+      color: #e7ecf2;
+      overflow: hidden;
+      display: none;
+    }
+    .card-header { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; padding: 14px 14px 10px; border-bottom: 1px solid #1b2230; }
+    .card-title { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: .2px; }
+    .card-meta { font-size: 13px; opacity: .8; }
+    .card-close { appearance: none; background: transparent; color: #aeb9cc; border: 0; font-size: 22px; line-height: 1; cursor: pointer; padding: 6px 10px; border-radius: 8px; }
+    .card-close:hover { color: #fff; background: #182132; }
+    .card-body { display: grid; grid-template-columns: 160px 1fr; gap: 14px; padding: 14px; align-items: start; }
+    .card-body img { width: 160px; height: 120px; object-fit: cover; border-radius: 8px; border: 1px solid #263145; box-shadow: 0 6px 24px rgba(0,0,0,.45); }
+    .card-desc { font-size: 14px; line-height: 1.45; color: #d6deea; white-space: pre-wrap; }
+    .card-tags { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; }
+    .tag { font-size: 12px; padding: 4px 8px; border-radius: 999px; background: #132033; color: #cfe0ff; border: 1px solid #21324a; }
+
+    .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 20px; background: #0f141b; color: #d4ddea; padding: 10px 14px; border-radius: 10px; font-size: 13px; border: 1px solid #223148; display: none; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>Virtual Gallery</h1>
+      <div class="hint">Click a frame to open its card. Drag to look around. Scroll to zoom.</div>
+    </header>
+    <div id="panoc"></div>
+  </div>
+
+  <aside id="card" class="card-overlay" aria-live="polite" aria-modal="true">
+    <div class="card-header">
+      <div>
+        <h2 id="cardTitle" class="card-title"></h2>
+        <div id="cardMeta" class="card-meta"></div>
+      </div>
+      <button id="cardClose" class="card-close" title="Close">×</button>
+    </div>
+    <div class="card-body">
+      <img id="cardImg" alt="Artwork preview" />
+      <div>
+        <div id="cardDesc" class="card-desc"></div>
+        <div id="cardTags" class="card-tags"></div>
+      </div>
+    </div>
+  </aside>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    const PANORAMA_URL = "gallery/gallery001.png";
+    const ART_IMAGE_BASE = "artworks/";
+    const ART_IMAGE_EXT = ".png";
+    const ZERO_PAD = 3;
+    const SHEET_CSV_URL = "";
+
+    const LAYOUT = {
+      rows: 1,
+      pitchTopDeg: 3,
+      pitchRowGapDeg: -10,
+      yawOffsetDeg: 0
+    };
+
+    const LIMIT_COUNT = 0;
+
+    const SAMPLE_CSV = `number,title,artist,year,medium,dimensions,price,description,image\n1,Sample Work 1,Unknown,2024,Plastic,40x30cm,$100,Description one,\n2,Sample Work 2,Unknown,2024,Plastic,50x35cm,$200,Description two,`;
+
+    function zeroPad(n, width) { const s = String(n); return s.length >= width ? s : "0".repeat(width - s.length) + s; }
+    function el(q) { return document.querySelector(q); }
+    function toast(msg, ms=2200){ const t=el('#toast'); t.textContent=msg; t.style.display='block'; clearTimeout(toast._h); toast._h=setTimeout(()=>t.style.display='none', ms); }
+
+    function parseCSV(text){
+      const rows = []; let i=0, field='', row=[], inQuotes=false; 
+      while(i < text.length){
+        const c = text[i++];
+        if (inQuotes) {
+          if (c === '"') {
+            if (text[i] === '"') { field+='"'; i++; }
+            else { inQuotes = false; }
+          } else { field += c; }
+        } else {
+          if (c === '"') { inQuotes = true; }
+          else if (c === ',') { row.push(field); field=''; }
+          else if (c === '\n' || c === '\r') {
+            if (field!=='' || row.length) { row.push(field); rows.push(row); row=[]; field=''; }
+          } else { field += c; }
+        }
+      }
+      if (field!=='' || row.length) { row.push(field); rows.push(row); }
+      const header = rows.shift().map(h=>h.trim());
+      return rows.filter(r=>r.length && r.some(v=>String(v).trim()!==''))
+                 .map(r=>Object.fromEntries(header.map((h,idx)=>[h, (r[idx]||'').trim()])));
+    }
+
+    async function loadArtData(){
+      try {
+        if (SHEET_CSV_URL && SHEET_CSV_URL.startsWith('http')) {
+          const res = await fetch(SHEET_CSV_URL, { cache: 'no-store' });
+          if (!res.ok) throw new Error('CSV fetch failed: '+res.status);
+          const text = await res.text();
+          return parseCSV(text);
+        } else {
+          toast('Using sample data. Set SHEET_CSV_URL for live sheet.');
+          return parseCSV(SAMPLE_CSV);
+        }
+      } catch(err){ console.error(err); toast('Data load error. See console.'); return []; }
+    }
+
+    function positionForIndex(indexZeroBased, total){
+      const rows = Math.max(1, LAYOUT.rows|0);
+      const perRow = Math.ceil(total / rows);
+      const row = Math.floor(indexZeroBased / perRow);
+      const idxInRow = indexZeroBased - row*perRow;
+      const countThisRow = Math.min(perRow, total - row*perRow);
+      const yawStep = 360 / countThisRow;
+      const yaw = -180 + (idxInRow + 0.5) * yawStep + LAYOUT.yawOffsetDeg;
+      const pitch = (LAYOUT.pitchTopDeg + row * LAYOUT.pitchRowGapDeg);
+      return { yaw, pitch };
+    }
+
+    let viewer = null;
+    function initPano(){
+      if (viewer) { try { viewer.destroy(); } catch(_){} }
+      viewer = pannellum.viewer('panoc', {
+        type: 'equirectangular',
+        panorama: PANORAMA_URL,
+        autoLoad: true,
+        showControls: true,
+        compass: false,
+        yaw: 0,
+        pitch: 0,
+        hfov: 85,
+        minHfov: 40,
+        maxHfov: 110,
+        friction: 0.15,
+        backgroundColor: [11,13,16]
+      });
+
+      viewer.on('load', async () => {
+        const data = await loadArtData();
+        const items = (LIMIT_COUNT>0) ? data.slice(0, LIMIT_COUNT) : data;
+        addArtHotspots(items);
+        toast(`${items.length} artworks loaded`);
+      });
+    }
+
+    function slotRenderer(hotSpotDiv, args){
+      hotSpotDiv.classList.add('art-slot');
+      hotSpotDiv.setAttribute('data-artno', args.number);
+      hotSpotDiv.style.backgroundImage = `url("${args.imageUrl}")`;
+      hotSpotDiv.addEventListener('click', ()=>openCard(args));
+      hotSpotDiv.setAttribute('role','button');
+      hotSpotDiv.setAttribute('tabindex','0');
+      hotSpotDiv.addEventListener('keydown', e=>{ if(e.key==='Enter' || e.key===' '){ e.preventDefault(); openCard(args);} });
+    }
+
+    function addArtHotspots(artworks){
+      const total = artworks.length;
+      artworks.forEach((art, i)=>{
+        const n = parseInt(art.number, 10);
+        if (Number.isNaN(n)) return;
+        const pos = positionForIndex(i, total);
+        const imageUrl = art.image && art.image.trim() !== ''
+          ? resolveImageURL(art.image.trim())
+          : resolveImageURL(zeroPad(n, ZERO_PAD) + ART_IMAGE_EXT);
+        viewer.addHotSpot({
+          pitch: pos.pitch,
+          yaw: pos.yaw,
+          cssClass: 'art-slot',
+          createTooltipFunc: slotRenderer,
+          createTooltipArgs: {
+            number: String(n),
+            title: art.title || '',
+            artist: art.artist || '',
+            year: art.year || '',
+            medium: art.medium || '',
+            dimensions: art.dimensions || '',
+            price: art.price || '',
+            description: art.description || '',
+            imageUrl
+          }
+        });
+      });
+    }
+
+    function resolveImageURL(fileName){
+      if (/^https?:\/\//i.test(fileName)) return fileName;
+      const base = ART_IMAGE_BASE.endsWith('/') ? ART_IMAGE_BASE : ART_IMAGE_BASE + '/';
+      return base + fileName.replace(/^\/*/,'');
+    }
+
+    function openCard(args){
+      el('#cardTitle').textContent = args.title ? args.title : `Artwork ${args.number}`;
+      const metaParts = [];
+      if (args.artist) metaParts.push(args.artist);
+      if (args.year) metaParts.push(args.year);
+      if (args.medium) metaParts.push(args.medium);
+      if (args.dimensions) metaParts.push(args.dimensions);
+      if (args.price) metaParts.push(args.price);
+      el('#cardMeta').textContent = metaParts.join(' • ');
+      el('#cardImg').src = args.imageUrl;
+      el('#cardDesc').textContent = args.description || '';
+      const tags = [];
+      if (args.number) tags.push(`#${args.number}`);
+      if (args.title) tags.push(args.title);
+      el('#cardTags').innerHTML = tags.map(t=>`<span class="tag">${escapeHtml(t)}</span>`).join('');
+      el('#card').style.display = 'block';
+      document.addEventListener('keydown', escListener);
+    }
+
+    function closeCard(){ el('#card').style.display = 'none'; document.removeEventListener('keydown', escListener); }
+    function escListener(e){ if (e.key === 'Escape') closeCard(); }
+    el('#cardClose').addEventListener('click', closeCard);
+
+    function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c])); }
+
+    (async function main(){ initPano(); })();
+  </script>
+</body>
+</html>
