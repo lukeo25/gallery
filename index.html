@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Gallery Zero</title>
 
+<!-- Pannellum: viewer only (no syntax highlighters anywhere) -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css">
 <script src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js"></script>
 
@@ -39,30 +40,30 @@ const USE_BILINEAR = true;
 const BACKGROUND_RGBA = [255,255,255,255];
 
 /* ===================== LIGHTING ===================== */
-/* Brighter baseline so it never feels too dark */
+/* Bright baseline */
 const AMBIENT = 0.55;
 
 /* Downlights: 5 per wall, soft cone + distance falloff */
 const DOWNLIGHTS = {
   perWall: 5,
-  outFromWall: 0.10,       // fixture sits a hair in front of wall
-  belowCeiling: 0.12,      // just below ceiling
-  coneAngleDeg: 60,        // cone full angle
-  featherDeg: 22,          // soft edge width
-  intensity: 2.0,          // brightness per light (brighter)
-  range: 7.5,              // meters (reach further)
-  forwardTiltDeg: 6        // 0 = straight down, >0 tilts toward wall
+  outFromWall: 0.10,
+  belowCeiling: 0.12,
+  coneAngleDeg: 60,
+  featherDeg: 22,
+  intensity: 2.0,
+  range: 7.5,
+  forwardTiltDeg: 6
 };
 
 /* Specular highlight (gloss) */
 const SPECULAR = 0.12;
 const SHININESS = 30.0;
 
-/* Shadows (cheap but effective) — OFF for now so lights are obvious */
+/* Shadows (cheap hard shadows) — OFF by default so lighting is obvious */
 const SHADOWS = false;
 const SHADOW_EPS = 1e-3;
 
-/* Bump/Normal strength */
+/* Bump/Normal mapping */
 const BUMP_SCALE = 1.5;
 const BUMP_EPS = 1.0/1024.0;
 /* ===================================================== */
@@ -195,14 +196,14 @@ function buildDownlights(planes){
 
   for (const w of walls){
     const count = DOWNLIGHTS.perWall;
-    const usable = (w.hu*2)*0.92; // small margins
+    const usable = (w.hu*2)*0.92; // margin
     const start = -usable/2;
 
     for (let i=0;i<count;i++){
       const t = (i+0.5)/count;
       const along = start + usable*t;
 
-      // near ceiling, slightly off wall toward room
+      // mount near top, slightly off wall toward room
       const nearTop = add(w.p, mul(w.B, w.hv - DOWNLIGHTS.belowCeiling));
       const forward = add(nearTop, mul(w.N, -DOWNLIGHTS.outFromWall));
       const pos = add(forward, mul(w.T, along));
@@ -226,15 +227,14 @@ function buildDownlights(planes){
 }
 
 /* ---------- cone response + shadows ---------- */
-/* FIXED: use light->point vector for cone angle test */
 function spotContribution(light, P, N){
   // Vector from light to point
   const LP = sub(P, light.pos);
   const dist = Math.hypot(LP[0],LP[1],LP[2]);
   if (dist <= 1e-6 || dist > light.range) return 0.0;
 
-  const V = normalize(LP); // light -> point (used for cone)
-  const L = normalize(mul(V, -1)); // point -> light (used for lambert)
+  const V = normalize(LP);        // light -> point (cone test)
+  const L = normalize(mul(V, -1)); // point -> light (lambert)
 
   // Cone angle using light->point
   const cosA = dot(V, normalize(light.dir));
@@ -249,19 +249,18 @@ function spotContribution(light, P, N){
     spot = t*t*(3 - 2*t);
   }
 
-  // Lambert term + distance falloff (quadratic-ish)
+  // Lambert + distance falloff
   const lambert = Math.max(0, dot(N, L));
   const att = Math.max(0, 1.0 - (dist / light.range));
   const fall = att*att; // quadratic
   return light.intensity * lambert * spot * fall;
 }
 
-/* Segment light->P visibility (simple hard shadows) */
 function visibleFromLight(light, P, planes, selfPlane){
   if (!SHADOWS) return 1.0;
   const LP = sub(P, light.pos);
   const distLP = Math.hypot(LP[0],LP[1],LP[2]);
-  const d = normalize(LP); // **light -> point** direction
+  const d = normalize(LP); // light -> point direction
   for (const pl of planes){
     if (pl === selfPlane) continue; // prevent self-shadow
     const n_dot_d = dot(pl.N, d);
@@ -269,12 +268,13 @@ function visibleFromLight(light, P, planes, selfPlane){
     const t = dot(pl.N, [pl.p[0]-light.pos[0], pl.p[1]-light.pos[1], pl.p[2]-light.pos[2]]) / n_dot_d;
     if (t <= SHADOW_EPS || t >= distLP - SHADOW_EPS) continue;
 
-    // intersection point
+    // intersection
     const Hx = light.pos[0] + t*d[0];
     const Hy = light.pos[1] + t*d[1];
     const Hz = light.pos[2] + t*d[2];
     const rel = [Hx - pl.p[0], Hy - pl.p[1], Hz - pl.p[2]];
-    const cu = dot(rel, pl.T), cv = dot(rel, pl.B);
+    const cu = rel[0]*pl.T[0] + rel[1]*pl.T[1] + rel[2]*pl.T[2];
+    const cv = rel[0]*pl.B[0] + rel[1]*pl.B[1] + rel[2]*pl.B[2];
     if (Math.abs(cu) <= pl.hu && Math.abs(cv) <= pl.hv){
       return 0.0; // blocked
     }
@@ -350,112 +350,15 @@ async function bakeRoom(){
 
         const Hx=t*ray[0], Hy=ROOM.eyeY+t*ray[1], Hz=t*ray[2];
         const rel=[Hx-pl.p[0], Hy-pl.p[1], Hz-pl.p[2]];
-        const cu=dot(rel, pl.T), cv=dot(rel, pl.B);
+        const cu=rel[0]*pl.T[0] + rel[1]*pl.T[1] + rel[2]*pl.T[2];
+        const cv=rel[0]*pl.B[0] + rel[1]*pl.B[1] + rel[2]*pl.B[2];
         if (Math.abs(cu) > pl.hu || Math.abs(cv) > pl.hv) continue;
 
         const u = (cu + pl.hu) / (2*pl.hu);
-        const v = (pl.hv - cv) / (2*pl.hv);
-        bestT = t;
-        hit = { pl, u, v, P:[Hx,Hy,Hz], V: normalize(mul(ray,-1)) };
+        const v = (pl.hv - cv) / (2*plv);
       }
-
-      if (!hit) continue;
-      const tex = textures[hit.pl.id];
-      if (!tex) continue;
-
-      // base color
-      let [r,g,b,a] = sampleColor(tex, hit.u, hit.v);
-      if (a===0) continue;
-
-      // world-space normal
-      let Nw = hit.pl.N;
-      if (tex.normal){
-        const Nt = sampleNormal(tex, hit.u, hit.v);
-        Nw = normalize([
-          hit.pl.T[0]*Nt[0] + hit.pl.B[0]*Nt[1] + hit.pl.N[0]*Nt[2],
-          hit.pl.T[1]*Nt[0] + hit.pl.B[1]*Nt[1] + hit.pl.N[1]*Nt[2],
-          hit.pl.T[2]*Nt[0] + hit.pl.B[2]*Nt[1] + hit.pl.N[2]*Nt[2]
-        ]);
-      }else if (tex.bump){
-        const Nt = sampleBump(tex, hit.u, hit.v);
-        Nw = normalize([
-          hit.pl.T[0]*Nt[0] + hit.pl.B[0]*Nt[1] + hit.pl.N[0]*Nt[2],
-          hit.pl.T[1]*Nt[0] + hit.pl.B[1]*Nt[1] + hit.pl.N[1]*Nt[2],
-          hit.pl.T[2]*Nt[0] + hit.pl.B[2]*Nt[1] + hit.pl.N[2]*Nt[2]
-        ]);
-      }
-
-      // lighting = ambient + sum(spot cones * visibility) + specular
-      let Lsum = AMBIENT;
-      let spec = 0.0;
-
-      for (const Lsrc of lights){
-        const vis = visibleFromLight(Lsrc, hit.P, planes, hit.pl); // =1 when SHADOWS=false
-        if (vis <= 0) continue;
-
-        const contrib = spotContribution(Lsrc, hit.P, Nw) * vis;
-        if (contrib <= 0) continue;
-
-        Lsum += contrib;
-
-        if (SPECULAR > 0){
-          const Ldir = normalize(sub(Lsrc.pos, hit.P)); // point->light
-          const R = reflect(mul(Ldir,-1), Nw);
-          const rv = Math.max(0, dot(R, hit.V));
-          spec += SPECULAR * Math.pow(rv, SHININESS) * contrib;
-        }
-      }
-
-      // gentle clamp so super bright spots don't blow out drastically
-      Lsum = Math.min(2.0, Lsum);
-
-      const di = (y*W + x)*4;
-      D[di  ] = Math.round(r * Lsum + 255 * spec);
-      D[di+1] = Math.round(g * Lsum + 255 * spec);
-      D[di+2] = Math.round(b * Lsum + 255 * spec);
-      D[di+3] = a;
     }
   }
-
-  // commit + downscale
-  ctx0.putImageData(imgData,0,0);
-  if (SUPERSAMPLE!==1.0){
-    const final=document.createElement('canvas');
-    final.width=OUTPUT.width; final.height=OUTPUT.height;
-    const fx=final.getContext('2d'); fx.imageSmoothingEnabled=true;
-    fx.drawImage(cvs,0,0,W,H,0,0,final.width,final.height);
-    cvs.width=final.width; cvs.height=final.height;
-    const gx=cvs.getContext('2d'); gx.drawImage(final,0,0);
-  }
-
-  const blob = await new Promise(res => el('#bake').toBlob(res,"image/png",0.95));
-  return URL.createObjectURL(blob);
-}
-
-/* ---------- viewer ---------- */
-function startViewer(panoUrl){
-  pannellum.viewer('viewer', {
-    type: 'equirectangular',
-    panorama: panoUrl,
-    autoLoad: true,
-    showControls: true,
-    yaw: 0, pitch: 0, hfov: 85, minHfov: 40, maxHfov: 110,
-    backgroundColor: [11,13,16]
-  });
-}
-
-/* ---------- go ---------- */
-(async function main(){
-  try{
-    toast('Baking Gallery Zero…');
-    const url = await bakeRoom();
-    toast('Starting viewer…');
-    startViewer(url);
-  }catch(err){
-    console.error(err);
-    toast('Baking failed. Check /walls file names & that the repo is public.');
-  }
-})();
 </script>
 </body>
 </html>
