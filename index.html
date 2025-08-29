@@ -3,296 +3,265 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Virtual Gallery</title>
+  <title>Baked Equirect Gallery</title>
 
-  <!-- Pannellum CSS & JS -->
+  <!-- Pannellum -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css">
   <script src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js"></script>
 
   <style>
-    html, body { height: 100%; margin: 0; background: #0b0d10; color: #e7ecf2; font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; }
-    #app { display: grid; grid-template-rows: auto 1fr; height: 100%; }
-    header { padding: 10px 14px; background: #12151a; border-bottom: 1px solid #1e2230; display: flex; gap: 12px; align-items: center; }
-    header h1 { font-size: 16px; font-weight: 600; margin: 0; letter-spacing: .3px; }
-    header .hint { opacity: .75; font-size: 13px; }
+    html, body { height:100%; margin:0; background:#0b0d10; color:#e7ecf2; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; }
+    header { padding:10px 14px; background:#12151a; border-bottom:1px solid #1e2230; display:flex; gap:12px; align-items:center;}
+    header h1{ margin:0; font-size:16px; font-weight:600 }
+    header .hint{ opacity:.75; font-size:13px }
+    #viewer{ height:calc(100vh - 48px) }
 
-    #panoc { height: calc(100vh - 48px); position: relative; }
-    .pnlm-container { position: relative; overflow: hidden; }
-    .pnlm-render-container, .pnlm-render-canvas { width: 100%; height: 100%; display: block; }
-
-    /* Wrapper we rotate to fake perspective */
-    .art-wrap { transform-origin: center center; will-change: transform; }
-
-    /* Billboard itself (size applied per-image in JS) */
-    .art-slot {
-      border: 4px solid rgba(255,255,255,.9);
-      box-shadow: 0 6px 20px rgba(0,0,0,.45), inset 0 0 0 1px rgba(0,0,0,.25);
-      border-radius: 6px;
-      background-size: cover;
-      background-position: center;
-      background-repeat: no-repeat;
+    /* Invisible (but clickable) hotspots */
+    .hotspot-hit {
+      width: 220px;              /* base size; pannellum scales this when scale:true */
+      height: 140px;
+      background: rgba(255,255,255,0.0);    /* fully transparent */
+      border: 0;
+      outline: none;
       cursor: pointer;
-      opacity: 0;                           /* fade in only after positioned & sized */
-      transition: opacity .22s ease, box-shadow .15s ease;
     }
-    .art-slot.ready { opacity: 1; }
-    .art-slot:hover { box-shadow: 0 10px 24px rgba(0,0,0,.6), inset 0 0 0 1px rgba(0,0,0,.25); }
-
-    /* small number badge (can remove if you don’t want it) */
-    .art-slot::after {
-      content: attr(data-artno);
-      position: absolute; right: -10px; top: -10px; width: 28px; height: 28px; border-radius: 999px;
-      display: grid; place-items: center; background: #111923; color: #e7ecf2; font-size: 12px; border: 2px solid #3a4a63;
-      box-shadow: 0 4px 10px rgba(0,0,0,.45);
-    }
-
-    /* Card */
-    .card-overlay {
-      position: fixed; inset: auto 16px 16px auto; width: min(520px, calc(100% - 32px)); max-height: 80vh;
-      border-radius: 14px; background: #0f141b; border: 1px solid #1e2633; box-shadow: 0 20px 60px rgba(0,0,0,.6);
-      color: #e7ecf2; overflow: hidden; display: none; z-index: 20;
-    }
-    .card-header { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; padding: 14px 14px 10px; border-bottom: 1px solid #1b2230; }
-    .card-title { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: .2px; }
-    .card-meta { font-size: 13px; opacity: .8; }
-    .card-close { appearance: none; background: transparent; color: #aeb9cc; border: 0; font-size: 22px; line-height: 1; cursor: pointer; padding: 6px 10px; border-radius: 8px; }
-    .card-close:hover { color: #fff; background: #182132; }
-    .card-body { display: grid; grid-template-columns: 180px 1fr; gap: 14px; padding: 14px; align-items: start; }
-    .card-body img { width: 180px; height: 135px; object-fit: cover; border-radius: 8px; border: 1px solid #263145; box-shadow: 0 6px 24px rgba(0,0,0,.45); }
-    .card-desc { font-size: 14px; line-height: 1.45; color: #d6deea; white-space: pre-wrap; }
-    .card-tags { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; }
-    .tag { font-size: 12px; padding: 4px 8px; border-radius: 999px; background: #132033; color: #cfe0ff; border: 1px solid #21324a; }
-
-    .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 20px; background: #0f141b; color: #d4ddea; padding: 10px 14px; border-radius: 10px; font-size: 13px; border: 1px solid #223148; display: none; z-index: 30; }
+    .hotspot-hit:focus{ box-shadow:0 0 0 2px #5da0ffaa; border-radius:6px }
+    /* Toast */
+    .toast{ position:fixed; left:50%; transform:translateX(-50%); bottom:20px; background:#0f141b; color:#d4ddea; padding:10px 14px; border-radius:10px; font-size:13px; border:1px solid #223148; display:none; z-index:30 }
+    /* Hidden canvas used to bake the panorama+artworks */
+    #bake { display:none }
   </style>
 </head>
 <body>
-  <div id="app">
-    <header>
-      <h1>Virtual Gallery</h1>
-      <div class="hint">Click a frame to open its card. Drag to look around. Scroll to zoom.</div>
-    </header>
-    <div id="panoc"></div>
-  </div>
-
-  <aside id="card" class="card-overlay" aria-live="polite" aria-modal="true">
-    <div class="card-header">
-      <div>
-        <h2 id="cardTitle" class="card-title"></h2>
-        <div id="cardMeta" class="card-meta"></div>
-      </div>
-      <button id="cardClose" class="card-close" title="Close">×</button>
-    </div>
-    <div class="card-body">
-      <img id="cardImg" alt="Artwork preview" />
-      <div>
-        <div id="cardDesc" class="card-desc"></div>
-        <div id="cardTags" class="card-tags"></div>
-      </div>
-    </div>
-  </aside>
-
+  <header>
+    <h1>Baked Equirect Gallery</h1>
+    <div class="hint">Images are composited into the pano; hotspots are transparent click areas.</div>
+  </header>
+  <div id="viewer"></div>
+  <canvas id="bake"></canvas>
   <div id="toast" class="toast"></div>
 
   <script>
-    /* ===== Repo & folders (public) ===== */
+    /* ---------- Settings (no placeholders) ---------- */
     const GH_USER = "lukeo25";
     const GH_REPO = "gallery";
-    const PANORAMA_URL = "https://raw.githubusercontent.com/lukeo25/gallery/refs/heads/main/gallery/gallery001.png";
-    const API_LIST = `https://api.github.com/repos/${GH_USER}/${GH_REPO}/contents/artworks`;
+    const ARTWORKS_API = `https://api.github.com/repos/${GH_USER}/${GH_REPO}/contents/artworks`;
+    const PANO_URL_RAW = "https://raw.githubusercontent.com/lukeo25/gallery/refs/heads/main/gallery/gallery001.png";
 
-    /* Layout across 360°. If you want a single wall, say and I’ll switch it. */
-    const LAYOUT = { rows: 1, pitchTopDeg: 3, pitchRowGapDeg: -12, yawOffsetDeg: 0 };
+    /* Auto layout around the equator */
+    const LAYOUT = { rows: 1, pitchTopDeg: 0, pitchRowGapDeg: -12, yawOffsetDeg: 0 };
 
-    /* Wall-aware “fake perspective” */
-    const TILT = {
-      yawFactor: 1.0,      // effect strength for left/right
-      pitchFactor: 0.8,    // effect strength for up/down
-      maxYaw: 35,          // clamps
-      maxPitch: 25,
-      perspective: 1000,   // CSS perspective(px)
-      snap: 90,            // snap each frame to nearest wall normal (every 90°)
-      invertYaw: false,    // flip if rotation still feels reversed for your pano
-      invertPitch: true    // flip pitch so looking up makes top tilt away (usually true)
-    };
+    /* Artwork angular sizing (how big each picture is in the world). We keep constant height in degrees. */
+    const ART_HEIGHT_DEG = 14;       // apparent height on the sphere
+    const SHADOW = { enabled: true, blur: 16, color: "rgba(0,0,0,0.35)", offsetX: 0, offsetY: 6, border: "rgba(255,255,255,0.85)" };
 
-    /* Billboard size box in CSS pixels (before pannellum scales with zoom) */
-    const SIZE_BOX = { maxW: 240, maxH: 240, minW: 100, minH: 100 };
+    /* Hotspot base CSS size used by pannellum (scaled with zoom when scale:true) */
+    const HOTSPOT_BASE_PX = { w: 220, h: 140 };
 
-    /* Utils */
-    function el(q){ return document.querySelector(q); }
-    function toast(msg,ms=2400){ const t=el('#toast'); t.textContent=msg; t.style.display='block'; clearTimeout(toast._h); toast._h=setTimeout(()=>t.style.display='none',ms); }
-    function escapeHtml(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-    function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
-    function normDeg(d){ d = ((d + 180) % 360 + 360) % 360 - 180; return d; } // [-180,180]
-
-    function numFromFilename(name){
-      const m = /^(\d+)\.(png|jpg|jpeg|webp)$/i.exec(name);
-      return m ? parseInt(m[1], 10) : null;
-    }
-
-    async function fetchArtworkList(){
-      const res = await fetch(API_LIST, { cache: 'no-store' });
-      if(!res.ok) throw new Error("GitHub API " + res.status);
-      const files = await res.json();
-      return files
-        .filter(f => f.type === "file" && /\.(png|jpg|jpeg|webp)$/i.test(f.name))
-        .map(f => ({ number: numFromFilename(f.name), name: f.name, url: f.download_url }))
-        .filter(x => Number.isFinite(x.number))
-        .sort((a,b) => a.number - b.number)
-        .map(x => ({
-          number: String(x.number),
-          title: "", artist: "", year: "", medium: "", dimensions: "", price: "", description: "",
-          imageUrl: x.url
-        }));
-    }
+    /* ---------- Utilities ---------- */
+    const el = q => document.querySelector(q);
+    function toast(msg, ms=2400){ const t=el('#toast'); t.textContent=msg; t.style.display='block'; clearTimeout(toast._h); toast._h=setTimeout(()=>t.style.display='none',ms); }
+    function normYaw(d){ d=((d+180)%360+360)%360-180; return d; } // [-180,180]
+    function numFromName(n){ const m=/^(\d+)\.(png|jpg|jpeg|webp)$/i.exec(n); return m?parseInt(m[1],10):null; }
 
     function positionForIndex(i,total){
       const rows = Math.max(1, LAYOUT.rows|0);
       const perRow = Math.ceil(total/rows);
       const row = Math.floor(i/perRow);
       const idxInRow = i - row*perRow;
-      const countThisRow = Math.min(perRow, total - row*perRow);
-      const yawStep = 360 / Math.max(1, countThisRow);
+      const countRow = Math.min(perRow, total - row*perRow);
+      const yawStep = 360 / Math.max(1, countRow);
       const yaw = -180 + (idxInRow + 0.5) * yawStep + LAYOUT.yawOffsetDeg;
-      const pitch = (LAYOUT.pitchTopDeg + row * LAYOUT.pitchRowGapDeg);
+      const pitch = LAYOUT.pitchTopDeg + row * LAYOUT.pitchRowGapDeg;
       return { yaw, pitch };
     }
 
-    /* Keep refs for tilt */
-    const HOTSPOTS = []; // {wrap, yaw, pitch, wallYaw}
+    /* Draw with horizontal wrap-around: if x<0 or x+w>W, split across edges */
+    function drawWrapped(ctx, img, x, y, w, h, W){
+      // integer math not required; canvas accepts floats
+      if (x >= 0 && x + w <= W){
+        ctx.drawImage(img, x, y, w, h);
+      } else {
+        let x1 = x, w1 = w;
+        while (x1 < 0) x1 += W;
+        while (x1 >= W) x1 -= W;
+        if (x1 + w1 > W){
+          const wRight = W - x1;
+          ctx.drawImage(img, 0, 0, img.naturalWidth * (wRight/w), img.naturalHeight, x1, y, wRight, h);
+          const wLeft  = w1 - wRight;
+          ctx.drawImage(img, img.naturalWidth * (wRight/w), 0, img.naturalWidth * (wLeft/w), img.naturalHeight, 0, y, wLeft, h);
+        } else {
+          ctx.drawImage(img, x1, y, w1, h);
+        }
+      }
+    }
 
-    let viewer = null, rafId = null;
+    async function listArtworks(){
+      const r = await fetch(ARTWORKS_API, { cache:'no-store' });
+      if(!r.ok) throw new Error('GitHub API '+r.status);
+      const files = await r.json();
+      return files
+        .filter(f=>f.type==='file' && /\.(png|jpg|jpeg|webp)$/i.test(f.name))
+        .map(f=>({ n:numFromName(f.name), name:f.name, url:f.download_url }))
+        .filter(a=>Number.isFinite(a.n))
+        .sort((a,b)=>a.n-b.n);
+    }
 
-    function initPano(){
-      if(viewer){ try{ viewer.destroy(); }catch{} }
-      if(rafId){ cancelAnimationFrame(rafId); rafId = null; }
-      HOTSPOTS.length = 0;
+    function loadImage(src){
+      return new Promise((resolve, reject)=>{
+        const img=new Image(); img.crossOrigin='anonymous';
+        img.onload=()=>resolve(img); img.onerror=()=>reject(new Error('img '+src));
+        img.src=src;
+      });
+    }
 
-      viewer = pannellum.viewer('panoc', {
+    /* ---------- Bake step: panorama + artworks => blob URL ---------- */
+    async function bakeComposite(){
+      // Load pano and file list
+      const [panoImg, items] = await Promise.all([ loadImage(PANO_URL_RAW), listArtworks() ]);
+
+      // Load all artworks
+      const imgs = await Promise.all(items.map(i=>loadImage(i.url)));
+
+      // Setup canvas
+      const W = panoImg.naturalWidth;
+      const H = panoImg.naturalHeight;
+      const cvs = el('#bake'); cvs.width=W; cvs.height=H;
+      const ctx = cvs.getContext('2d');
+
+      // Draw base pano
+      ctx.drawImage(panoImg, 0, 0, W, H);
+
+      // Optional: nicer look with white stroke & shadow to mimic frames
+      function drawFramed(img, x, y, w, h){
+        if (SHADOW.enabled){
+          ctx.save();
+          ctx.shadowColor = SHADOW.color;
+          ctx.shadowBlur = SHADOW.blur;
+          ctx.shadowOffsetX = SHADOW.offsetX;
+          ctx.shadowOffsetY = SHADOW.offsetY;
+          drawWrapped(ctx, img, x, y, w, h, W);
+          ctx.restore();
+          // white border
+          ctx.save();
+          ctx.lineWidth = Math.max(2, Math.min(w,h)*0.02);
+          ctx.strokeStyle = SHADOW.border;
+          ctx.beginPath();
+          // handle wrap by stroking on both sides if needed
+          if (x >= 0 && x + w <= W){
+            ctx.rect(x, y, w, h);
+            ctx.stroke();
+          } else {
+            // right slice
+            let x1=x; while(x1<0) x1+=W; while(x1>=W) x1-=W;
+            const wRight = Math.min(w, W-x1);
+            ctx.rect(x1, y, wRight, h); ctx.stroke();
+            // left slice
+            if (wRight < w){
+              const wLeft = w - wRight;
+              ctx.beginPath(); ctx.rect(0, y, wLeft, h); ctx.stroke();
+            }
+          }
+          ctx.restore();
+        } else {
+          drawWrapped(ctx, img, x, y, w, h, W);
+        }
+      }
+
+      // Place each artwork: compute angular size from constant height, preserve aspect
+      for (let i=0;i<items.length;i++){
+        const meta = items[i];
+        const img  = imgs[i];
+        const pos  = positionForIndex(i, items.length);
+
+        // Angular size -> pixel size
+        const hDeg = ART_HEIGHT_DEG;
+        const hPx  = H * (hDeg / 180);
+        const aspect = img.naturalWidth / img.naturalHeight;
+        const wPx  = hPx * aspect;
+
+        // Convert yaw/pitch to pixel center
+        const cx = W * ((normYaw(pos.yaw) + 180) / 360);
+        const cy = H * ((90 - pos.pitch) / 180);
+
+        const x = cx - wPx/2;
+        const y = cy - hPx/2;
+
+        drawFramed(img, x, y, wPx, hPx);
+
+        // Store hotspot spec for later (yaw/pitch + approximate size)
+        meta._yaw   = pos.yaw;
+        meta._pitch = pos.pitch;
+        meta._w     = HOTSPOT_BASE_PX.w; // visual is baked; hotspot only needs a sensible click size
+        meta._h     = HOTSPOT_BASE_PX.h;
+      }
+
+      // Export to blob URL and return {url, items}
+      const blob = await new Promise(res => cvs.toBlob(res, 'image/png', 0.95));
+      const url  = URL.createObjectURL(blob);
+      return { panoUrl:url, items };
+    }
+
+    /* ---------- Pannellum viewer with transparent hotspots ---------- */
+    function startViewer(panoUrl, items){
+      const viewer = pannellum.viewer('viewer', {
         type: 'equirectangular',
-        panorama: PANORAMA_URL,
+        panorama: panoUrl,
         autoLoad: true,
         showControls: true,
         yaw: 0, pitch: 0, hfov: 85, minHfov: 40, maxHfov: 110,
         backgroundColor: [11,13,16]
       });
 
-      viewer.on('error', e => { console.error('Pannellum error:', e); toast('Error loading panorama'); });
-
-      viewer.on('load', async () => {
-        try {
-          const items = await fetchArtworkList();
-          addArtHotspots(items);
-          requestAnimationFrame(() => {
-            document.querySelectorAll('.art-slot').forEach(n => n.classList.add('ready'));
-          });
-          tiltLoop();
-          toast(`${items.length} artworks loaded`);
-        } catch (err) {
-          console.error(err);
-          toast("Couldn't list /artworks via GitHub API");
-        }
-      });
-    }
-
-    function slotRenderer(div, args){
-      const wrap = document.createElement('div');
-      wrap.className = 'art-wrap';
-      wrap.style.transform = `perspective(${TILT.perspective}px)`;
-
-      const tile = document.createElement('div');
-      tile.className = 'art-slot';
-      tile.style.backgroundImage = `url("${args.imageUrl}")`;
-      tile.setAttribute('data-artno', args.number);
-      tile.setAttribute('role', 'button');
-      tile.setAttribute('tabindex', '0');
-
-      wrap.appendChild(tile);
-      div.appendChild(wrap);
-
-      // Size to true aspect ratio
-      const img = new Image();
-      img.onload = () => {
-        const iw = img.naturalWidth || 1;
-        const ih = img.naturalHeight || 1;
-        const aspect = iw / ih;
-        let w = SIZE_BOX.maxW, h = w / aspect;
-        if (h > SIZE_BOX.maxH) { h = SIZE_BOX.maxH; w = h * aspect; }
-        if (w < SIZE_BOX.minW) { w = SIZE_BOX.minW; h = w / aspect; }
-        if (h < SIZE_BOX.minH) { h = SIZE_BOX.minH; w = h * aspect; }
-        tile.style.width = `${Math.round(w)}px`;
-        tile.style.height = `${Math.round(h)}px`;
-      };
-      img.onerror = () => { tile.style.width = `${SIZE_BOX.minW}px`; tile.style.height = `${SIZE_BOX.minH}px`; };
-      img.src = args.imageUrl;
-
-      tile.addEventListener('click', ()=>openCard(args));
-      tile.addEventListener('keydown', e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); openCard(args);} });
-
-      // “Wall normal” yaw = nearest multiple of TILT.snap (e.g., 0, ±90, 180)
-      const wallYaw = Math.round(args._yaw / TILT.snap) * TILT.snap;
-      HOTSPOTS.push({ wrap, yaw: args._yaw, pitch: args._pitch, wallYaw });
-    }
-
-    function addArtHotspots(items){
-      const total = items.length;
-      items.forEach((art, i) => {
-        const pos = positionForIndex(i,total);
+      // Transparent hit areas
+      items.forEach((art, i)=>{
         viewer.addHotSpot({
-          pitch: pos.pitch,
-          yaw: pos.yaw,
-          scale: true,                 // scales with zoom so it feels attached
-          cssClass: 'art-slot',
-          createTooltipFunc: slotRenderer,
-          createTooltipArgs: { ...art, _yaw: pos.yaw, _pitch: pos.pitch }
+          yaw: art._yaw,
+          pitch: art._pitch,
+          scale: true,                         // scales with zoom; visuals are baked
+          createTooltipFunc: (div, args)=>{
+            div.className = 'hotspot-hit';
+            // size the invisible hitbox (can tweak per aspect if you want)
+            div.style.width  = args.w + 'px';
+            div.style.height = args.h + 'px';
+            div.setAttribute('aria-label', 'Artwork '+args.number);
+            div.tabIndex = 0;
+            div.addEventListener('click', ()=>openCard(args));
+            div.addEventListener('keydown', e=>{
+              if(e.key==='Enter' || e.key===' ') { e.preventDefault(); openCard(args); }
+            });
+          },
+          createTooltipArgs: {
+            number: art.n || i+1,
+            title:  art.title || '',
+            imageUrl: art.url,
+            w: art._w,
+            h: art._h
+          }
         });
       });
-    }
 
-    /* Wall-aware fake perspective: tilt by (wallYaw - cameraYaw) and (pitch - cameraPitch) */
-    function updateTilt(){
-      if(!viewer) return;
-      const cy = viewer.getYaw();
-      const cp = viewer.getPitch();
-      for(const h of HOTSPOTS){
-        const dy = normDeg(h.wallYaw - cy);    // compare to wall normal, not hotspot bearing
-        const dp = normDeg(h.pitch - cp);
-
-        let ry = clamp(dy * TILT.yawFactor, -TILT.maxYaw, TILT.maxYaw);
-        let rx = clamp(dp * TILT.pitchFactor, -TILT.maxPitch, TILT.maxPitch);
-
-        if (TILT.invertYaw)  ry = -ry;
-        if (TILT.invertPitch) rx = -rx;
-
-        h.wrap.style.transform = `perspective(${TILT.perspective}px) rotateY(${ry}deg) rotateX(${rx}deg)`;
+      function openCard(a){
+        // Basic popup using alert for brevity; replace with your card UI if you like
+        alert((a.title ? a.title+'\n' : '') + 'Artwork #' + a.number);
       }
-    }
-    function tiltLoop(){ updateTilt(); rafId = requestAnimationFrame(tiltLoop); }
 
-    function openCard(a){
-      el('#cardTitle').textContent = a.title || `Artwork ${a.number}`;
-      const meta = [];
-      if (a.artist) meta.push(a.artist);
-      if (a.year) meta.push(a.year);
-      if (a.medium) meta.push(a.medium);
-      if (a.dimensions) meta.push(a.dimensions);
-      if (a.price) meta.push(a.price);
-      el('#cardMeta').textContent = meta.join(' • ');
-      el('#cardImg').src = a.imageUrl;
-      el('#cardDesc').textContent = a.description || '';
-      const tags = [];
-      if (a.number) tags.push(`#${a.number}`);
-      if (a.title) tags.push(a.title);
-      el('#cardTags').innerHTML = tags.map(t=>`<span class="tag">${escapeHtml(t)}</span>`).join('');
-      el('#card').style.display = 'block';
-      document.addEventListener('keydown', escListener);
+      viewer.on('load', ()=>toast('Gallery loaded'));
+      viewer.on('error', e=>{ console.error(e); toast('Pannellum error'); });
     }
-    function closeCard(){ el('#card').style.display = 'none'; document.removeEventListener('keydown', escListener); }
-    function escListener(e){ if(e.key==='Escape') closeCard(); }
-    el('#cardClose').addEventListener('click', closeCard);
 
-    (function main(){ initPano(); })();
+    /* ---------- Run ---------- */
+    (async function main(){
+      try{
+        toast('Baking panorama…');
+        const { panoUrl, items } = await bakeComposite();
+        toast('Starting viewer…');
+        startViewer(panoUrl, items);
+      }catch(err){
+        console.error(err);
+        toast('Failed to bake or load. Is repo public and folders correct?');
+      }
+    })();
   </script>
 </body>
 </html>
