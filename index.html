@@ -3,28 +3,23 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Gallery Zero</title>
+<title>Welcome to Luke O'Donnell's Gallery</title>
 
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css">
 <script src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js"></script>
 
 <style>
   html,body{height:100%;margin:0;background:#0b0d10;color:#e7ecf2;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
-  header{padding:10px 14px;background:#12151a;border-bottom:1px solid #1e2230;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
-  header h1{margin:0;font-size:16px;font-weight:600}
-  header .hint{opacity:.8;font-size:13px}
-  #viewer{height:calc(100vh - 60px)}
+  header{padding:10px 14px;background:#12151a;border-bottom:1px solid #1e2230;display:flex;align-items:center;justify-content:center}
+  header h1{margin:0;font-size:18px;font-weight:700;letter-spacing:.2px}
+  #viewer{height:calc(100vh - 56px)}
   #bake{display:none}
   .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:20px;background:#0f141b;color:#d4ddea;padding:10px 14px;border-radius:10px;font-size:13px;border:1px solid #223148;display:none;z-index:30}
-  .warn{padding:6px 10px;background:#332; border:1px solid #633; border-radius:8px; font-size:12px; margin-left:auto}
-  code{background:#111319;border:1px solid #1d2331;padding:2px 6px;border-radius:6px}
 </style>
 </head>
 <body>
   <header>
-    <h1>Gallery Zero</h1>
-  
-    <div id="warn" class="warn" style="display:none"></div>
+    <h1>Welcome to Luke O'Donnell's Gallery</h1>
   </header>
 
   <div id="viewer"></div>
@@ -37,22 +32,44 @@ const GH_USER = "lukeo25";
 const GH_REPO = "gallery";
 const WALLS_API = `https://api.github.com/repos/${GH_USER}/${GH_REPO}/contents/walls`;
 
+/* Room (meters) and alignment */
 const ROOM = { width: 10.0, depth: 10.0, height: 3.0, eyeY: 1.6 };
-const GLOBAL_YAW_DEG = 0;          // try 90 / -90 / 180 if orientation feels off
-const SHIFT_Y_M = 0.0;             // shift entire room up/down (meters)
+const GLOBAL_YAW_DEG = 0;   // rotate whole room if needed (try 90 / -90 / 180)
+const SHIFT_Y_M = 0.0;      // nudge room up/down
 
-const OUTPUT = { width: 4096, height: 2048 }; // pano resolution
-const SUPERSAMPLE = 1.25;          // 1.0..2.0 (higher = crisper, slower)
-const USE_BILINEAR = true;         // bilinear sampling
-const BACKGROUND_RGBA = [255,255,255,255]; // white background (was dark)
+/* Output panorama size & quality */
+const OUTPUT = { width: 4096, height: 2048 };
+const SUPERSAMPLE = 1.25;           // 1.0..2.0 (higher = crisper, slower)
+const USE_BILINEAR = true;          // bilinear sampling for textures
+const BACKGROUND_RGBA = [255,255,255,255]; // background color if nothing hits
+
+/* Lighting */
+const AMBIENT = 0.35;               // 0..1 ambient term
+const DIFFUSE = 0.75;               // 0..1 diffuse intensity
+const SPECULAR = 0.15;              // 0..1 specular intensity
+const SHININESS = 32.0;             // specular power
+// Directional light (world space) — edit to taste:
+const LIGHT_DIR_WORLD = normalize([ -0.4, 0.8, -0.4 ]); // coming from above-left-front
+
+/* Bump/Normal settings */
+const BUMP_SCALE = 1.5;             // strength for height (bump) maps (world units per uv)
+const BUMP_EPS = 1.0/1024.0;        // uv delta for gradient on bump maps
 /* =================================================== */
 
 const el = q => document.querySelector(q);
 function toast(msg,ms=2000){ const t=el('#toast'); t.textContent=msg; t.style.display='block'; clearTimeout(toast._h); toast._h=setTimeout(()=>t.style.display='none',ms); }
-function warn(msg){ const w=el('#warn'); w.textContent=msg; w.style.display='inline-block'; }
 
-/* ---------- math ---------- */
+/* ---------- math utils ---------- */
 const D2R=Math.PI/180, R2D=180/Math.PI;
+function normalize(v){ const L=Math.hypot(v[0],v[1],v[2])||1; return [v[0]/L, v[1]/L, v[2]/L]; }
+function dot(a,b){ return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; }
+function add(a,b){ return [a[0]+b[0], a[1]+b[1], a[2]+b[2]]; }
+function sub(a,b){ return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]; }
+function mul(a,k){ return [a[0]*k, a[1]*k, a[2]*k]; }
+function reflect(I,N){ // reflect I around N; both normalized
+  const dn = dot(I,N);
+  return sub(I, mul(N, 2*dn));
+}
 function dirFromYawPitch(yawDeg,pitchDeg){
   const y=yawDeg*D2R, p=pitchDeg*D2R;
   const cp=Math.cos(p), sp=Math.sin(p), cy=Math.cos(y), sy=Math.sin(y);
@@ -63,7 +80,6 @@ function rotateY(v, yawDeg){
   const x=v[0], z=v[2];
   return [c*x + s*z, v[1], -s*x + c*z];
 }
-function add(a,b){ return [a[0]+b[0], a[1]+b[1], a[2]+b[2]]; }
 
 /* ---------- sampling ---------- */
 function sampleBilinear(S, sw, sh, u, v){
@@ -84,13 +100,6 @@ function sampleBilinear(S, sw, sh, u, v){
     Math.round(lerp(a0, a1, dy))
   ];
 }
-function blend(dst, di, r,g,b,a){
-  const af=a/255, ia=1-af;
-  dst[di]   = Math.round(r*af + dst[di]*ia);
-  dst[di+1] = Math.round(g*af + dst[di+1]*ia);
-  dst[di+2] = Math.round(b*af + dst[di+2]*ia);
-  dst[di+3] = Math.round(255*(af + (dst[di+3]/255)*ia));
-}
 
 /* ---------- repo ---------- */
 async function listPngs(folderApi){
@@ -108,12 +117,10 @@ function loadImage(src){
   });
 }
 
-/* ---------- planes ---------- */
+/* ---------- plane setup ---------- */
 function buildPlanes(){
   const hw = ROOM.width/2, hd = ROOM.depth/2, hh = ROOM.height/2;
-
-  // Base definitions (before rotation / shift)
-  const planes = [
+  const base = [
     { id:"west",  n:[+1,0,0], u:[0,0,+1],  v:[0,1,0],    p:[-hw, hh, 0],        hu:hd, hv:hh, png:"west.png"  },
     { id:"east",  n:[-1,0,0], u:[0,0,-1],  v:[0,1,0],    p:[+hw, hh, 0],        hu:hd, hv:hh, png:"east.png"  },
     { id:"north", n:[0,0,+1], u:[+1,0,0],  v:[0,1,0],    p:[0, hh, -hd],        hu:hw, hv:hh, png:"north.png" },
@@ -121,116 +128,222 @@ function buildPlanes(){
     { id:"floor", n:[0,1,0],  u:[+1,0,0],  v:[0,0,+1],   p:[0, 0, 0],           hu:hw, hv:hd, png:"floor.png" },
     { id:"roof",  n:[0,-1,0], u:[+1,0,0],  v:[0,0,+1],   p:[0, ROOM.height, 0], hu:hw, hv:hd, png:"roof.png"  }
   ];
-
-  // Apply yaw rotation and vertical shift to every plane
-  return planes.map(pl=>{
-    const n = rotateY(pl.n, GLOBAL_YAW_DEG);
-    const u = rotateY(pl.u, GLOBAL_YAW_DEG);
-    const v = rotateY(pl.v, GLOBAL_YAW_DEG);
+  return base.map(pl=>{
+    const n = normalize(rotateY(pl.n, GLOBAL_YAW_DEG));
+    const u = normalize(rotateY(pl.u, GLOBAL_YAW_DEG));
+    const v = normalize(rotateY(pl.v, GLOBAL_YAW_DEG));
     const p = rotateY(pl.p, GLOBAL_YAW_DEG);
     p[1] += SHIFT_Y_M;
-    return { ...pl, n, u, v, p };
+    const T = u, B = v, N = n; // tangent frame
+    return { ...pl, n:N, u:T, v:B, p, T, B, N };
   });
 }
 
-/* ---------- baking (nearest-hit) ---------- */
-async function bakeRoom(){
-  const wallFiles = await listPngs(WALLS_API);
-  const texMap = Object.create(null);
-  wallFiles.forEach(f => texMap[f.name] = f.url);
-
-  // Load textures we have
-  const planes = buildPlanes();
-  const textures = {};
+/* ---------- loading textures (albedo + normal/bump) ---------- */
+async function loadPlaneTextures(map, planes){
+  const tex = {};
   for (const pl of planes){
-    const url = texMap[pl.png];
-    if (!url) continue;
-    try{
-      const img = await loadImage(url);
-      const sc = document.createElement('canvas');
-      sc.width  = Math.max(1, Math.round(img.naturalWidth  * SUPERSAMPLE));
-      sc.height = Math.max(1, Math.round(img.naturalHeight * SUPERSAMPLE));
-      const sx = sc.getContext('2d');
-      sx.imageSmoothingEnabled = true;
-      sx.drawImage(img, 0,0, sc.width, sc.height);
-      textures[pl.id] = { w: sc.width, h: sc.height, data: sx.getImageData(0,0,sc.width,sc.height).data };
-    }catch(e){ console.warn(`Failed to load ${pl.id}`, e); }
-  }
+    const colorUrl = map[pl.png];
+    if (!colorUrl) continue;
 
-  if (Object.keys(textures).length === 0){
-    warn("No textures found in /walls — you’ll get a plain background.");
-  }
+    const normalUrl = map[pl.png.replace('.png','_n.png')];
+    const bumpUrl   = map[pl.png.replace('.png','_b.png')];
 
-  // Prepare output
-  const W0 = OUTPUT.width, H0 = OUTPUT.height;
-  const W = Math.max(1, Math.round(W0 * SUPERSAMPLE));
-  const H = Math.max(1, Math.round(H0 * SUPERSAMPLE));
+    // Color
+    const imgC = await loadImage(colorUrl);
+    const cC = document.createElement('canvas');
+    cC.width  = Math.max(1, Math.round(imgC.naturalWidth  * SUPERSAMPLE));
+    cC.height = Math.max(1, Math.round(imgC.naturalHeight * SUPERSAMPLE));
+    const cx = cC.getContext('2d'); cx.imageSmoothingEnabled = true;
+    cx.drawImage(imgC, 0,0, cC.width, cC.height);
+    const C = cx.getImageData(0,0,cC.width,cC.height).data;
+
+    // Normal (optional)
+    let N = null;
+    if (normalUrl){
+      try{
+        const imgN = await loadImage(normalUrl);
+        const cN = document.createElement('canvas');
+        cN.width  = Math.max(1, Math.round(imgN.naturalWidth  * SUPERSAMPLE));
+        cN.height = Math.max(1, Math.round(imgN.naturalHeight * SUPERSAMPLE));
+        const nx = cN.getContext('2d'); nx.imageSmoothingEnabled = true;
+        nx.drawImage(imgN, 0,0, cN.width, cN.height);
+        N = nx.getImageData(0,0,cN.width,cN.height).data;
+        tex[pl.id] = { color:{data:C,w:cC.width,h:cC.height}, normal:{data:N,w:cN.width,h:cN.height}, bump:null };
+        continue; // prefer normal over bump if both exist
+      }catch(e){ console.warn('normal map fail', pl.id, e); }
+    }
+
+    // Bump (optional)
+    let B = null;
+    if (bumpUrl){
+      try{
+        const imgB = await loadImage(bumpUrl);
+        const cB = document.createElement('canvas');
+        cB.width  = Math.max(1, Math.round(imgB.naturalWidth  * SUPERSAMPLE));
+        cB.height = Math.max(1, Math.round(imgB.naturalHeight * SUPERSAMPLE));
+        const bx = cB.getContext('2d'); bx.imageSmoothingEnabled = true;
+        bx.drawImage(imgB, 0,0, cB.width, cB.height);
+        B = bx.getImageData(0,0,cB.width,cB.height).data;
+      }catch(e){ console.warn('bump map fail', pl.id, e); }
+    }
+
+    tex[pl.id] = { color:{data:C,w:cC.width,h:cC.height}, normal:null, bump: B ? {data:B,w:cC.width,h:cC.height} : null };
+  }
+  return tex;
+}
+
+/* ---------- shading helpers ---------- */
+function sampleColor(tex, u, v){
+  const {data,w,h} = tex.color;
+  if (USE_BILINEAR){
+    return sampleBilinear(data, w, h, u, v);
+  }else{
+    const sx = Math.min(w-1, Math.max(0, Math.floor(u * w)));
+    const sy = Math.min(h-1, Math.max(0, Math.floor(v * h)));
+    const si = (sy*w + sx) * 4;
+    return [data[si], data[si+1], data[si+2], data[si+3]];
+  }
+}
+function sampleNormal(tex, u, v){
+  const {data,w,h} = tex.normal;
+  const [r,g,b] = USE_BILINEAR ? sampleBilinear(data, w, h, u, v) : (()=>{
+    const sx=Math.min(w-1,Math.max(0,Math.floor(u*w)));
+    const sy=Math.min(h-1,Math.max(0,Math.floor(v*h)));
+    const si=(sy*w+sx)*4; return [data[si],data[si+1],data[si+2]];
+  })();
+  // Tangent-space normal map in [0,255] -> [-1,1]
+  const nx = (r/255)*2-1;
+  const ny = (g/255)*2-1;
+  const nz = (b/255)*2-1;
+  return normalize([nx, ny, nz]);
+}
+function sampleBump(tex, u, v){
+  // Return tangent-space normal from a grayscale height map via finite difference
+  const {data,w,h} = tex.bump;
+  function height(U,V){
+    const fx = Math.max(0, Math.min(w-1, U*(w-1)));
+    const fy = Math.max(0, Math.min(h-1, V*(h-1)));
+    const x = Math.round(fx), y = Math.round(fy);
+    const i = (y*w + x)*4;
+    return data[i]*0.299 + data[i+1]*0.587 + data[i+2]*0.114; // luma
+  }
+  const du = BUMP_EPS, dv = BUMP_EPS;
+  const hC = height(u,v);
+  const hR = height(Math.min(1,u+du), v);
+  const hU = height(u, Math.max(0,v-dv)); // remember v is top->bottom
+  // Gradients (higher height => facing "up")
+  const dhdu = (hR - hC) / 255.0;
+  const dhdv = (hU - hC) / 255.0;
+  // Tangent-space normal: x ~ -dH/du, y ~ -dH/dv, z ~ 1
+  return normalize([ -BUMP_SCALE*dhdu, -BUMP_SCALE*dhdv, 1.0 ]);
+}
+
+/* ---------- main bake (nearest-hit + lighting) ---------- */
+async function bakeRoom(){
+  // Load file list
+  const files = await listPngs(WALLS_API);
+  const map = Object.create(null);
+  files.forEach(f => map[f.name] = f.url);
+
+  const planes = buildPlanes();
+  const textures = await loadPlaneTextures(map, planes);
+
+  const W0=OUTPUT.width, H0=OUTPUT.height;
+  const W=Math.max(1,Math.round(W0*SUPERSAMPLE));
+  const H=Math.max(1,Math.round(H0*SUPERSAMPLE));
   const cvs = el('#bake'); cvs.width=W; cvs.height=H;
   const ctx0 = cvs.getContext('2d', { willReadFrequently:true });
 
-  // Fill background
+  // Background
   ctx0.fillStyle = `rgba(${BACKGROUND_RGBA[0]},${BACKGROUND_RGBA[1]},${BACKGROUND_RGBA[2]},${BACKGROUND_RGBA[3]/255})`;
   ctx0.fillRect(0,0,W,H);
   let imgData = ctx0.getImageData(0,0,W,H);
   const D = imgData.data;
 
-  // Render: for each pixel, find nearest plane hit
   const eyeY = ROOM.eyeY;
+  const L = LIGHT_DIR_WORLD; // normalized already
 
   for (let y=0; y<H; y++){
     const pitch = 90 - (y + 0.5) * 180 / H;
     for (let x=0; x<W; x++){
       const yaw = (x + 0.5) * 360 / W - 180;
-      const d = dirFromYawPitch(yaw, pitch);
+      const ray = dirFromYawPitch(yaw, pitch);   // from eye (0,eyeY,0)
 
       let bestT = Infinity;
-      let bestPlane = null;
-      let hitU = 0, hitV = 0;
+      let hit = null;
 
       for (const pl of planes){
-        const n_dot_d = pl.n[0]*d[0] + pl.n[1]*d[1] + pl.n[2]*d[2];
-        if (Math.abs(n_dot_d) <= 1e-8) continue; // parallel
+        const n_dot_d = dot(pl.N, ray);
+        if (Math.abs(n_dot_d) <= 1e-9) continue;
 
-        const CminusO = [ pl.p[0], pl.p[1] - eyeY, pl.p[2] ];
-        const t = (pl.n[0]*CminusO[0] + pl.n[1]*CminusO[1] + pl.n[2]*CminusO[2]) / n_dot_d;
-        if (t <= 0 || t >= bestT) continue;      // behind eye or not nearest
+        const t = dot(pl.N, [pl.p[0], pl.p[1]-eyeY, pl.p[2]]) / n_dot_d;
+        if (t <= 0 || t >= bestT) continue;
 
-        const Hx = t*d[0], Hy = eyeY + t*d[1], Hz = t*d[2];
-        const rx = Hx - pl.p[0], ry = Hy - pl.p[1], rz = Hz - pl.p[2];
+        const Hx = t*ray[0], Hy = eyeY + t*ray[1], Hz = t*ray[2];
+        const rel = [Hx - pl.p[0], Hy - pl.p[1], Hz - pl.p[2]];
+        const cu = dot(rel, pl.T);
+        const cv = dot(rel, pl.B);
+        if (Math.abs(cu) > pl.hu || Math.abs(cv) > pl.hv) continue;
 
-        const cu = rx*pl.u[0] + ry*pl.u[1] + rz*pl.u[2];
-        const cv = rx*pl.v[0] + ry*pl.v[1] + rz*pl.v[2];
-        if (Math.abs(cu) > pl.hu || Math.abs(cv) > pl.hv) continue; // outside
-
+        const u = (cu + pl.hu) / (2*pl.hu);
+        const v = (pl.hv - cv) / (2*pl.hv); // top->bottom
         bestT = t;
-        bestPlane = pl;
-        // map to 0..1 (v top->bottom)
-        hitU = (cu + pl.hu) / (2*pl.hu);
-        hitV = (pl.hv - cv) / (2*pl.hv);
+        hit = { pl, u, v, viewDir: normalize(mul(ray, -1)) }; // V points toward camera
       }
 
-      if (bestPlane){
-        const tex = textures[bestPlane.id];
-        if (tex){
-          let r,g,b,a;
-          if (USE_BILINEAR){
-            [r,g,b,a] = sampleBilinear(tex.data, tex.w, tex.h, hitU, hitV);
-          }else{
-            const sx = Math.min(tex.w-1, Math.max(0, Math.floor(hitU * tex.w)));
-            const sy = Math.min(tex.h-1, Math.max(0, Math.floor(hitV * tex.h)));
-            const si = (sy * tex.w + sx) * 4;
-            r=tex.data[si]; g=tex.data[si+1]; b=tex.data[si+2]; a=tex.data[si+3];
-          }
-          if (a > 0){
-            const di = (y * W + x) * 4;
-            blend(D, di, r,g,b,a);
-          }
-        }
+      if (!hit) continue; // background already filled
+
+      const tex = textures[hit.pl.id];
+      if (!tex) continue;
+
+      // Albedo
+      let [r,g,b,a] = sampleColor(tex, hit.u, hit.v);
+      if (a === 0) continue;
+
+      // Base normal in world = plane normal
+      let Nw = hit.pl.N;
+
+      // Normal/bump?
+      if (tex.normal){
+        const Nt = sampleNormal(tex, hit.u, hit.v);     // tangent space
+        // Tangent frame (T,B,N) -> world
+        const T = hit.pl.T, B = hit.pl.B, N = hit.pl.N;
+        Nw = normalize([
+          T[0]*Nt[0] + B[0]*Nt[1] + N[0]*Nt[2],
+          T[1]*Nt[0] + B[1]*Nt[1] + N[1]*Nt[2],
+          T[2]*Nt[0] + B[2]*Nt[1] + N[2]*Nt[2]
+        ]);
+      } else if (tex.bump){
+        const Nt = sampleBump(tex, hit.u, hit.v);       // from height → tangent normal
+        const T = hit.pl.T, B = hit.pl.B, N = hit.pl.N;
+        Nw = normalize([
+          T[0]*Nt[0] + B[0]*Nt[1] + N[0]*Nt[2],
+          T[1]*Nt[0] + B[1]*Nt[1] + N[1]*Nt[2],
+          T[2]*Nt[0] + B[2]*Nt[1] + N[2]*Nt[2]
+        ]);
       }
+
+      // Lighting
+      const ndl = Math.max(0, dot(Nw, L));
+      const diffuse = DIFFUSE * ndl;
+      let spec = 0.0;
+      if (SPECULAR > 0 && ndl > 0){
+        const R = reflect(mul(L,-1), Nw);
+        const rv = Math.max(0, dot(R, hit.viewDir));
+        spec = SPECULAR * Math.pow(rv, SHININESS);
+      }
+      const lit = Math.min(1.0, AMBIENT + diffuse + spec);
+
+      const di = (y*W + x)*4;
+      D[di  ] = Math.round((r) * lit);
+      D[di+1] = Math.round((g) * lit);
+      D[di+2] = Math.round((b) * lit);
+      D[di+3] = a;
     }
   }
 
-  // Commit & downscale (SSAA)
+  // Commit & downscale
   ctx0.putImageData(imgData, 0, 0);
   if (SUPERSAMPLE !== 1.0){
     const final = document.createElement('canvas');
@@ -238,7 +351,6 @@ async function bakeRoom(){
     const fx = final.getContext('2d');
     fx.imageSmoothingEnabled = true;
     fx.drawImage(cvs, 0,0, W, H, 0,0, W0, H0);
-
     cvs.width = W0; cvs.height = H0;
     const gx = cvs.getContext('2d');
     gx.drawImage(final, 0, 0);
@@ -263,14 +375,13 @@ function startViewer(panoUrl){
 /* ---------- go ---------- */
 (async function main(){
   try{
-    toast('Rendering nearest-hit pano…');
+    toast('Baking with bump/normal lighting…');
     const url = await bakeRoom();
     toast('Starting viewer…');
     startViewer(url);
   }catch(err){
     console.error(err);
-    warn('Baking failed — open console for details.');
-    toast('Failed to bake.');
+    toast('Failed to bake (check /walls file names & that repo is public).');
   }
 })();
 </script>
