@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Virtual Gallery</title>
 
-  <!-- Pannellum CSS & JS -->
+  <!-- Pannellum CSS & JS (CDN) -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css">
   <script src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js"></script>
 
@@ -15,9 +15,9 @@
     header { padding: 10px 14px; background: #12151a; border-bottom: 1px solid #1e2230; display: flex; gap: 12px; align-items: center; }
     header h1 { font-size: 16px; font-weight: 600; margin: 0; letter-spacing: .3px; }
     header .hint { opacity: .75; font-size: 13px; }
-    #panoc { height: calc(100vh - 48px); position: relative; }
 
-    /* Safety sizing in case CDN CSS is slow */
+    /* Viewer fills the viewport below the header */
+    #panoc { height: calc(100vh - 48px); position: relative; }
     .pnlm-container { position: relative; overflow: hidden; }
     .pnlm-render-container, .pnlm-render-canvas { width: 100%; height: 100%; display: block; }
 
@@ -87,27 +87,28 @@
   <div id="toast" class="toast"></div>
 
   <script>
-    /* ===== Paths & options (absolute URLs remove ambiguity) ===== */
-    const PANORAMA_URL   = "https://lukeo25.github.io/gallery/gallery/gallery001.png";
-    const ART_IMAGE_BASE = "https://lukeo25.github.io/gallery/artwork/";
+    /* ===== Paths (relative to repo root) ===== */
+    const PANORAMA_URL   = "gallery/gallery001.png"; // e.g. repo/gallery/gallery001.png
+    const ART_IMAGE_BASE = "artwork/";               // e.g. repo/artwork/001.png
     const ART_IMAGE_EXT  = ".png";
     const ZERO_PAD       = 3;
 
-    /* Scan for artwork/001.png..up to this many */
+    /* Auto-discover numbered files (001..ART_MAX_INDEX) */
     const ART_MAX_INDEX = 500;
     const CONCURRENCY   = 16;
 
-    /* Optional Google Sheet CSV (publish to web -> CSV). Leave empty to skip. */
-    const SHEET_CSV_URL = "";
+    /* Optional Google Sheet CSV to enrich metadata (leave empty to skip) */
+    const SHEET_CSV_URL = ""; // publish-to-web CSV link if you have one
 
-    /* Layout across the panorama */
+    /* Layout */
     const LAYOUT = { rows: 1, pitchTopDeg: 3, pitchRowGapDeg: -12, yawOffsetDeg: 0 };
 
     /* ===== Helpers ===== */
     function el(q){ return document.querySelector(q); }
-    function zeroPad(n,w){ const s = String(n); return s.length >= w ? s : "0".repeat(w - s.length) + s; }
+    function zeroPad(n,w){ const s=String(n); return s.length>=w ? s : "0".repeat(w-w>s?0:w-s.length)+s; } // safe pad
+    function zeroPad(n,w){ const s=String(n); return s.length>=w ? s : "0".repeat(w - s.length) + s; }    // (final)
     function toast(msg,ms=2600){ const t=el('#toast'); t.textContent=msg; t.style.display='block'; clearTimeout(toast._h); toast._h=setTimeout(()=>t.style.display='none',ms); }
-    function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+    function escapeHtml(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
     function parseCSV(text){
       const rows=[]; let i=0, field='', row=[], q=false;
@@ -126,10 +127,7 @@
         if(!res.ok) throw new Error('CSV ' + res.status);
         const rows = parseCSV(await res.text());
         const map = new Map();
-        for(const r of rows){
-          const num = parseInt(r.number,10);
-          if(Number.isFinite(num)) map.set(num, r);
-        }
+        for(const r of rows){ const num = parseInt(r.number,10); if(Number.isFinite(num)) map.set(num, r); }
         return map;
       }catch(e){ console.warn('CSV load failed:', e); return new Map(); }
     }
@@ -141,20 +139,17 @@
     }
 
     async function exists(url){
-      try{
-        const res = await fetch(url, { method:'HEAD', cache:'no-store' });
-        return res.ok;
-      }catch{ return false; }
+      try{ const res = await fetch(url, { method:'HEAD', cache:'no-store' }); return res.ok; }
+      catch{ return false; }
     }
 
     async function discoverArtworkNumbers(){
       const nums = Array.from({length: ART_MAX_INDEX}, (_,i)=>i+1);
       const found = [];
       let idx = 0;
-
       async function worker(){
         while(idx < nums.length){
-          const n = nums[idx++]; // take next
+          const n = nums[idx++];
           const url = resolveImageURL(zeroPad(n, ZERO_PAD) + ART_IMAGE_EXT);
           if(await exists(url)) found.push(n);
         }
@@ -167,7 +162,7 @@
     async function loadArtData(){
       const csvMap = await fetchCSVMap();
       const numbers = await discoverArtworkNumbers();
-      const items = numbers.map(n => {
+      return numbers.map(n => {
         const meta = csvMap.get(n) || {};
         const imageUrl = meta.image && meta.image.trim()
           ? resolveImageURL(meta.image.trim())
@@ -184,7 +179,6 @@
           imageUrl
         };
       });
-      return items;
     }
 
     function positionForIndex(i,total){
@@ -199,12 +193,10 @@
       return { yaw, pitch };
     }
 
-    let viewer = null;
-    let loadTimer = null;
+    let viewer = null, loadTimer = null;
 
     function initPano(){
       if(viewer){ try{ viewer.destroy(); }catch{} }
-
       viewer = pannellum.viewer('panoc', {
         type: 'equirectangular',
         panorama: PANORAMA_URL,
@@ -214,14 +206,11 @@
         backgroundColor: [11,13,16]
       });
 
-      viewer.on('error', e => {
-        console.error('Pannellum error:', e);
-        toast('Error loading panorama. See console.');
-      });
+      viewer.on('error', e => { console.error('Pannellum error:', e); toast('Error loading panorama'); });
 
       clearTimeout(loadTimer);
       loadTimer = setTimeout(() => {
-        toast('Still loading… check that gallery001.png is reachable.');
+        toast('Still loading… check gallery/gallery001.png path');
         console.warn('Timeout: pano likely not reachable at', PANORAMA_URL);
       }, 9000);
 
@@ -238,20 +227,16 @@
       div.setAttribute('data-artno', args.number);
       div.style.backgroundImage = `url("${args.imageUrl}")`;
       div.addEventListener('click', ()=>openCard(args));
-      div.setAttribute('role','button');
-      div.setAttribute('tabindex','0');
-      div.addEventListener('keydown', e => {
-        if(e.key==='Enter' || e.key===' '){ e.preventDefault(); openCard(args); }
-      });
+      div.setAttribute('role','button'); div.setAttribute('tabindex','0');
+      div.addEventListener('keydown', e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); openCard(args);} });
     }
 
     function addArtHotspots(items){
       const total = items.length;
       items.forEach((art, i) => {
-        const pos = positionForIndex(i, total);
+        const pos = positionForIndex(i,total);
         viewer.addHotSpot({
-          pitch: pos.pitch,
-          yaw: pos.yaw,
+          pitch: pos.pitch, yaw: pos.yaw,
           cssClass: 'art-slot',
           createTooltipFunc: slotRenderer,
           createTooltipArgs: art
@@ -273,13 +258,12 @@
       const tags = [];
       if (a.number) tags.push(`#${a.number}`);
       if (a.title) tags.push(a.title);
-      el('#cardTags').innerHTML = tags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('');
+      el('#cardTags').innerHTML = tags.map(t=>`<span class="tag">${escapeHtml(t)}</span>`).join('');
       el('#card').style.display = 'block';
       document.addEventListener('keydown', escListener);
     }
-
     function closeCard(){ el('#card').style.display = 'none'; document.removeEventListener('keydown', escListener); }
-    function escListener(e){ if(e.key === 'Escape') closeCard(); }
+    function escListener(e){ if(e.key==='Escape') closeCard(); }
     el('#cardClose').addEventListener('click', closeCard);
 
     (function main(){ initPano(); })();
