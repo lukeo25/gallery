@@ -84,9 +84,9 @@
   <div id="toast" class="toast"></div>
 
   <script>
-    /* ==== Paths in your repo (relative) ==== */
-    const PANORAMA_URL   = "gallery/gallery001.png";  // pano at repo/gallery/gallery001.png
-    const MANIFEST_URL   = "artwork/manifest.json";   // list of files to load from artwork/
+    /* ===== Paths (plural 'artworks') ===== */
+    const PANORAMA_URL = "gallery/gallery001.png";
+    const MANIFEST_URL = "artworks/manifest.json";   // <-- artworks folder
 
     /* Layout */
     const LAYOUT = { rows: 1, pitchTopDeg: 3, pitchRowGapDeg: -12, yawOffsetDeg: 0 };
@@ -130,7 +130,7 @@
           toast(`${items.length} artworks loaded`);
         } catch (e) {
           console.error(e);
-          toast('Could not read artwork/manifest.json');
+          toast('Could not read artworks/manifest.json');
         }
       });
     }
@@ -141,14 +141,13 @@
       const json = await res.json();
       if(!json || !Array.isArray(json.files)) throw new Error('manifest malformed');
 
-      // Build item records from list; number derived from filename prefix
       const items = json.files
         .map(name => ({ name, number: parseInt((name.match(/^(\d+)/)||['',0])[1],10) || 0 }))
         .sort((a,b)=>a.number-b.number)
         .map(x => ({
           number: String(x.number || x.name),
           title: "", artist: "", year: "", medium: "", dimensions: "", price: "", description: "",
-          imageUrl: "artwork/" + x.name
+          imageUrl: "artworks/" + x.name      // <-- artworks path here
         }));
       return items;
     }
