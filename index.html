@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Welcome to Luke O'Donnell's Gallery</title>
+<title>Welcome to Gallery Zero</title>
 
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css">
 <script src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js"></script>
@@ -19,7 +19,7 @@
 </head>
 <body>
   <header>
-    <h1>Welcome to Luke O'Donnell's Gallery</h1>
+    <h1>Welcome to Gallery Zero</h1>
   </header>
 
   <div id="viewer"></div>
@@ -27,56 +27,68 @@
   <div id="toast" class="toast"></div>
 
 <script>
-/* ===================== CONFIG ===================== */
+/* ===================== GEOMETRY / IO ===================== */
 const GH_USER = "lukeo25";
 const GH_REPO = "gallery";
 const WALLS_API = `https://api.github.com/repos/${GH_USER}/${GH_REPO}/contents/walls`;
 
-/* Room (meters) and alignment */
 const ROOM = { width: 10.0, depth: 10.0, height: 3.0, eyeY: 1.6 };
-const GLOBAL_YAW_DEG = 0;   // rotate whole room if needed (try 90 / -90 / 180)
-const SHIFT_Y_M = 0.0;      // nudge room up/down
+const GLOBAL_YAW_DEG = 0;     // rotate whole room if pano orientation needs it
+const SHIFT_Y_M = 0.0;        // nudge room up/down
 
-/* Output panorama size & quality */
 const OUTPUT = { width: 4096, height: 2048 };
-const SUPERSAMPLE = 1.25;           // 1.0..2.0 (higher = crisper, slower)
-const USE_BILINEAR = true;          // bilinear sampling for textures
-const BACKGROUND_RGBA = [255,255,255,255]; // background color if nothing hits
+const SUPERSAMPLE = 1.25;     // 1.0..2.0
+const USE_BILINEAR = true;
+const BACKGROUND_RGBA = [255,255,255,255];
 
-/* Lighting */
-const AMBIENT = 0.35;               // 0..1 ambient term
-const DIFFUSE = 0.75;               // 0..1 diffuse intensity
-const SPECULAR = 0.15;              // 0..1 specular intensity
-const SHININESS = 32.0;             // specular power
-// Directional light (world space) — edit to taste:
-const LIGHT_DIR_WORLD = normalize([ -0.4, 0.8, -0.4 ]); // coming from above-left-front
+/* ===================== LIGHTING CONFIG ===================== */
+/* Base ambient (room baseline) */
+const AMBIENT = 0.25;
+
+/* Downlight settings (auto 5 per wall) */
+const DOWNLIGHTS = {
+  perWall: 5,
+  // distance of fixtures out from wall (meters -> very small, keeps them near wall)
+  outFromWall: 0.10,
+  // vertical offset below the ceiling (meters)
+  belowCeiling: 0.15,
+  // cone full angle (degrees) and soft edge (degrees)
+  coneAngleDeg: 65,            // main cone
+  featherDeg: 20,              // soft edge width
+  // intensity and distance attenuation
+  intensity: 1.2,              // brightness per light (scaled by textured color 0..255)
+  range: 5.0,                  // how far light reaches usefully (meters)
+  // optional slight forward tilt to wash the wall (0 points straight down)
+  forwardTiltDeg: 5            // positive tilts a bit toward wall
+};
+
+/* Specular highlight (optional) */
+const SPECULAR = 0.07;
+const SHININESS = 28.0;
 
 /* Bump/Normal settings */
-const BUMP_SCALE = 1.5;             // strength for height (bump) maps (world units per uv)
-const BUMP_EPS = 1.0/1024.0;        // uv delta for gradient on bump maps
-/* =================================================== */
+const BUMP_SCALE = 1.5;
+const BUMP_EPS = 1.0/1024.0;
+/* =========================================================== */
 
 const el = q => document.querySelector(q);
 function toast(msg,ms=2000){ const t=el('#toast'); t.textContent=msg; t.style.display='block'; clearTimeout(toast._h); toast._h=setTimeout(()=>t.style.display='none',ms); }
 
-/* ---------- math utils ---------- */
-const D2R=Math.PI/180, R2D=180/Math.PI;
+/* ---------- math ---------- */
+const D2R=Math.PI/180;
 function normalize(v){ const L=Math.hypot(v[0],v[1],v[2])||1; return [v[0]/L, v[1]/L, v[2]/L]; }
-function dot(a,b){ return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; }
-function add(a,b){ return [a[0]+b[0], a[1]+b[1], a[2]+b[2]]; }
-function sub(a,b){ return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]; }
-function mul(a,k){ return [a[0]*k, a[1]*k, a[2]*k]; }
-function reflect(I,N){ // reflect I around N; both normalized
-  const dn = dot(I,N);
-  return sub(I, mul(N, 2*dn));
-}
+function dot(a,b){ return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+function add(a,b){ return [a[0]+b[0],a[1]+b[1],a[2]+b[2]]; }
+function sub(a,b){ return [a[0]-b[0],a[1]-b[1],a[2]-b[2]]; }
+function mul(a,k){ return [a[0]*k,a[1]*k,a[2]*k]; }
+function reflect(I,N){ const dn=dot(I,N); return sub(I, mul(N,2*dn)); }
 function dirFromYawPitch(yawDeg,pitchDeg){
   const y=yawDeg*D2R, p=pitchDeg*D2R;
   const cp=Math.cos(p), sp=Math.sin(p), cy=Math.cos(y), sy=Math.sin(y);
   return [cp*cy, sp, cp*sy];
 }
-function rotateY(v, yawDeg){
-  const y=yawDeg*D2R, c=Math.cos(y), s=Math.sin(y);
+function rotateY(v, deg){
+  const r=deg*D2R, c=Math.cos(r), s=Math.sin(r);
   const x=v[0], z=v[2];
   return [c*x + s*z, v[1], -s*x + c*z];
 }
@@ -91,17 +103,12 @@ function sampleBilinear(S, sw, sh, u, v){
   const i00 = (y0*sw + x0) * 4, i10 = (y0*sw + x1) * 4;
   const i01 = (y1*sw + x0) * 4, i11 = (y1*sw + x1) * 4;
   function lerp(a,b,t){ return a + (b-a)*t; }
-  const r0 = lerp(S[i00], S[i10], dx), g0 = lerp(S[i00+1], S[i10+1], dx), b0 = lerp(S[i00+2], S[i10+2], dx), a0 = lerp(S[i00+3], S[i10+3], dx);
-  const r1 = lerp(S[i01], S[i11], dx), g1 = lerp(S[i01+1], S[i11+1], dx), b1 = lerp(S[i01+2], S[i11+2], dx), a1 = lerp(S[i01+3], S[i11+3], dx);
-  return [
-    Math.round(lerp(r0, r1, dy)),
-    Math.round(lerp(g0, g1, dy)),
-    Math.round(lerp(b0, b1, dy)),
-    Math.round(lerp(a0, a1, dy))
-  ];
+  const r0=lerp(S[i00],S[i10],dx), g0=lerp(S[i00+1],S[i10+1],dx), b0=lerp(S[i00+2],S[i10+2],dx), a0=lerp(S[i00+3],S[i10+3],dx);
+  const r1=lerp(S[i01],S[i11],dx), g1=lerp(S[i01+1],S[i11+1],dx), b1=lerp(S[i01+2],S[i11+2],dx), a1=lerp(S[i01+3],S[i11+3],dx);
+  return [ Math.round(lerp(r0,r1,dy)), Math.round(lerp(g0,g1,dy)), Math.round(lerp(b0,b1,dy)), Math.round(lerp(a0,a1,dy)) ];
 }
 
-/* ---------- repo ---------- */
+/* ---------- repo helpers ---------- */
 async function listPngs(folderApi){
   const r = await fetch(folderApi, { cache:'no-store' });
   if(!r.ok){ if(r.status===404) return []; throw new Error("GitHub API "+r.status); }
@@ -117,7 +124,7 @@ function loadImage(src){
   });
 }
 
-/* ---------- plane setup ---------- */
+/* ---------- planes ---------- */
 function buildPlanes(){
   const hw = ROOM.width/2, hd = ROOM.depth/2, hh = ROOM.height/2;
   const base = [
@@ -134,12 +141,11 @@ function buildPlanes(){
     const v = normalize(rotateY(pl.v, GLOBAL_YAW_DEG));
     const p = rotateY(pl.p, GLOBAL_YAW_DEG);
     p[1] += SHIFT_Y_M;
-    const T = u, B = v, N = n; // tangent frame
-    return { ...pl, n:N, u:T, v:B, p, T, B, N };
+    return { ...pl, N:n, T:u, B:v, p };
   });
 }
 
-/* ---------- loading textures (albedo + normal/bump) ---------- */
+/* ---------- textures ---------- */
 async function loadPlaneTextures(map, planes){
   const tex = {};
   for (const pl of planes){
@@ -149,7 +155,6 @@ async function loadPlaneTextures(map, planes){
     const normalUrl = map[pl.png.replace('.png','_n.png')];
     const bumpUrl   = map[pl.png.replace('.png','_b.png')];
 
-    // Color
     const imgC = await loadImage(colorUrl);
     const cC = document.createElement('canvas');
     cC.width  = Math.max(1, Math.round(imgC.naturalWidth  * SUPERSAMPLE));
@@ -158,90 +163,136 @@ async function loadPlaneTextures(map, planes){
     cx.drawImage(imgC, 0,0, cC.width, cC.height);
     const C = cx.getImageData(0,0,cC.width,cC.height).data;
 
-    // Normal (optional)
-    let N = null;
+    let N=null, B=null;
     if (normalUrl){
       try{
-        const imgN = await loadImage(normalUrl);
-        const cN = document.createElement('canvas');
-        cN.width  = Math.max(1, Math.round(imgN.naturalWidth  * SUPERSAMPLE));
-        cN.height = Math.max(1, Math.round(imgN.naturalHeight * SUPERSAMPLE));
-        const nx = cN.getContext('2d'); nx.imageSmoothingEnabled = true;
-        nx.drawImage(imgN, 0,0, cN.width, cN.height);
+        const imgN=await loadImage(normalUrl);
+        const cN=document.createElement('canvas');
+        cN.width=Math.max(1,Math.round(imgN.naturalWidth*SUPERSAMPLE));
+        cN.height=Math.max(1,Math.round(imgN.naturalHeight*SUPERSAMPLE));
+        const nx=cN.getContext('2d'); nx.imageSmoothingEnabled=true;
+        nx.drawImage(imgN,0,0,cN.width,cN.height);
         N = nx.getImageData(0,0,cN.width,cN.height).data;
-        tex[pl.id] = { color:{data:C,w:cC.width,h:cC.height}, normal:{data:N,w:cN.width,h:cN.height}, bump:null };
-        continue; // prefer normal over bump if both exist
-      }catch(e){ console.warn('normal map fail', pl.id, e); }
+      }catch(e){}
     }
-
-    // Bump (optional)
-    let B = null;
-    if (bumpUrl){
+    if (!N && bumpUrl){
       try{
-        const imgB = await loadImage(bumpUrl);
-        const cB = document.createElement('canvas');
-        cB.width  = Math.max(1, Math.round(imgB.naturalWidth  * SUPERSAMPLE));
-        cB.height = Math.max(1, Math.round(imgB.naturalHeight * SUPERSAMPLE));
-        const bx = cB.getContext('2d'); bx.imageSmoothingEnabled = true;
-        bx.drawImage(imgB, 0,0, cB.width, cB.height);
+        const imgB=await loadImage(bumpUrl);
+        const cB=document.createElement('canvas');
+        cB.width=cC.width; cB.height=cC.height;
+        const bx=cB.getContext('2d'); bx.imageSmoothingEnabled=true;
+        bx.drawImage(imgB,0,0,cB.width,cB.height);
         B = bx.getImageData(0,0,cB.width,cB.height).data;
-      }catch(e){ console.warn('bump map fail', pl.id, e); }
+      }catch(e){}
     }
 
-    tex[pl.id] = { color:{data:C,w:cC.width,h:cC.height}, normal:null, bump: B ? {data:B,w:cC.width,h:cC.height} : null };
+    tex[pl.id] = { color:{data:C,w:cC.width,h:cC.height}, normal: N?{data:N,w:cC.width,h:cC.height}:null, bump: B?{data:B,w:cC.width,h:cC.height}:null };
   }
   return tex;
+}
+
+/* ---------- lighting: 5 soft downlights per wall ---------- */
+function buildDownlights(planes){
+  const lights = [];
+  const walls = planes.filter(p => p.id==="north" || p.id==="south" || p.id==="east" || p.id==="west");
+  const cone = DOWNLIGHTS.coneAngleDeg * D2R;
+  const feather = DOWNLIGHTS.featherDeg * D2R;
+  const halfW = ROOM.width/2, halfD = ROOM.depth/2;
+
+  for (const w of walls){
+    // Along the wall's U axis, equally spaced
+    const count = DOWNLIGHTS.perWall;
+    const usable = (w.hu*2)*0.92; // small margins
+    const start = -usable/2;
+    for (let i=0;i<count;i++){
+      const t = (i+0.5)/count;
+      const along = start + usable*t;
+
+      // position: near ceiling, slightly in front of wall (toward room center)
+      const nearTop = add(w.p, mul(w.B, w.hv - DOWNLIGHTS.belowCeiling)); // B is up
+      const forward = add(nearTop, mul(w.N, -DOWNLIGHTS.outFromWall));     // move a bit into the room
+      const pos = add(forward, mul(w.T, along));                            // along wall
+
+      // direction: mostly down, with slight forward tilt toward wall
+      const down = [0,-1,0];
+      // small blend between straight down and toward wall
+      const towardWall = mul(w.N, -1); // toward room interior
+      // tilt vector: mix down + slight forward
+      const mix = normalize(add(mul(down, Math.cos(DOWNLIGHTS.forwardTiltDeg*D2R)), mul(towardWall, Math.sin(DOWNLIGHTS.forwardTiltDeg*D2R))));
+
+      lights.push({
+        pos,
+        dir: mix,                 // normalized
+        cone, feather,
+        intensity: DOWNLIGHTS.intensity,
+        range: DOWNLIGHTS.range
+      });
+    }
+  }
+  return lights;
+}
+
+function softSpot(light, P, N){
+  // vector from light to point
+  const Lvec = sub(P, light.pos);
+  const dist = Math.hypot(Lvec[0],Lvec[1],Lvec[2]);
+  if (dist <= 1e-6 || dist > light.range) return 0.0;
+
+  const L = normalize(mul(Lvec, -1)); // direction from point toward light
+  // angle to cone axis
+  const cosAngle = dot(L, normalize(light.dir));
+  const angle = Math.acos(Math.max(-1, Math.min(1, cosAngle)));
+
+  const inner = Math.max(0, light.cone - light.feather);
+  if (angle > light.cone) return 0.0;
+  // smooth edge
+  let spot = 1.0;
+  if (angle > inner){
+    const t = (light.cone - angle) / (light.cone - inner);
+    spot = t*t*(3 - 2*t); // smoothstep
+  }
+
+  // lambertian with surface normal
+  const lambert = Math.max(0, dot(N, L));
+
+  // distance attenuation (smooth rolloff)
+  const att = Math.max(0, 1.0 - (dist / light.range));
+  // combine
+  return light.intensity * lambert * spot * att;
 }
 
 /* ---------- shading helpers ---------- */
 function sampleColor(tex, u, v){
   const {data,w,h} = tex.color;
-  if (USE_BILINEAR){
-    return sampleBilinear(data, w, h, u, v);
-  }else{
-    const sx = Math.min(w-1, Math.max(0, Math.floor(u * w)));
-    const sy = Math.min(h-1, Math.max(0, Math.floor(v * h)));
-    const si = (sy*w + sx) * 4;
-    return [data[si], data[si+1], data[si+2], data[si+3]];
-  }
+  if (USE_BILINEAR) return sampleBilinear(data, w, h, u, v);
+  const sx=Math.min(w-1,Math.max(0,Math.floor(u*w)));
+  const sy=Math.min(h-1,Math.max(0,Math.floor(v*h)));
+  const si=(sy*w+sx)*4;
+  return [data[si],data[si+1],data[si+2],data[si+3]];
 }
 function sampleNormal(tex, u, v){
   const {data,w,h} = tex.normal;
-  const [r,g,b] = USE_BILINEAR ? sampleBilinear(data, w, h, u, v) : (()=>{
-    const sx=Math.min(w-1,Math.max(0,Math.floor(u*w)));
-    const sy=Math.min(h-1,Math.max(0,Math.floor(v*h)));
-    const si=(sy*w+sx)*4; return [data[si],data[si+1],data[si+2]];
-  })();
-  // Tangent-space normal map in [0,255] -> [-1,1]
-  const nx = (r/255)*2-1;
-  const ny = (g/255)*2-1;
-  const nz = (b/255)*2-1;
+  const [r,g,b] = USE_BILINEAR ? sampleBilinear(data,w,h,u,v) : (()=>{const sx=Math.min(w-1,Math.max(0,Math.floor(u*w))); const sy=Math.min(h-1,Math.max(0,Math.floor(v*h))); const si=(sy*w+sx)*4; return [data[si],data[si+1],data[si+2]];})();
+  const nx = (r/255)*2-1, ny=(g/255)*2-1, nz=(b/255)*2-1;
   return normalize([nx, ny, nz]);
 }
 function sampleBump(tex, u, v){
-  // Return tangent-space normal from a grayscale height map via finite difference
   const {data,w,h} = tex.bump;
   function height(U,V){
-    const fx = Math.max(0, Math.min(w-1, U*(w-1)));
-    const fy = Math.max(0, Math.min(h-1, V*(h-1)));
-    const x = Math.round(fx), y = Math.round(fy);
-    const i = (y*w + x)*4;
-    return data[i]*0.299 + data[i+1]*0.587 + data[i+2]*0.114; // luma
+    const fx=Math.max(0,Math.min(w-1,U*(w-1)));
+    const fy=Math.max(0,Math.min(h-1,V*(h-1)));
+    const x=Math.round(fx), y=Math.round(fy);
+    const i=(y*w+x)*4;
+    return data[i]*0.299 + data[i+1]*0.587 + data[i+2]*0.114;
   }
-  const du = BUMP_EPS, dv = BUMP_EPS;
-  const hC = height(u,v);
-  const hR = height(Math.min(1,u+du), v);
-  const hU = height(u, Math.max(0,v-dv)); // remember v is top->bottom
-  // Gradients (higher height => facing "up")
-  const dhdu = (hR - hC) / 255.0;
-  const dhdv = (hU - hC) / 255.0;
-  // Tangent-space normal: x ~ -dH/du, y ~ -dH/dv, z ~ 1
+  const du=BUMP_EPS, dv=BUMP_EPS;
+  const hC=height(u,v), hR=height(Math.min(1,u+du),v), hU=height(u,Math.max(0,v-dv));
+  const dhdu=(hR-hC)/255.0, dhdv=(hU-hC)/255.0;
   return normalize([ -BUMP_SCALE*dhdu, -BUMP_SCALE*dhdv, 1.0 ]);
 }
 
-/* ---------- main bake (nearest-hit + lighting) ---------- */
+/* ---------- render: nearest-hit + multi downlights ---------- */
 async function bakeRoom(){
-  // Load file list
   const files = await listPngs(WALLS_API);
   const map = Object.create(null);
   files.forEach(f => map[f.name] = f.url);
@@ -252,111 +303,108 @@ async function bakeRoom(){
   const W0=OUTPUT.width, H0=OUTPUT.height;
   const W=Math.max(1,Math.round(W0*SUPERSAMPLE));
   const H=Math.max(1,Math.round(H0*SUPERSAMPLE));
-  const cvs = el('#bake'); cvs.width=W; cvs.height=H;
-  const ctx0 = cvs.getContext('2d', { willReadFrequently:true });
+  const cvs=el('#bake'); cvs.width=W; cvs.height=H;
+  const ctx0=cvs.getContext('2d',{willReadFrequently:true});
 
-  // Background
-  ctx0.fillStyle = `rgba(${BACKGROUND_RGBA[0]},${BACKGROUND_RGBA[1]},${BACKGROUND_RGBA[2]},${BACKGROUND_RGBA[3]/255})`;
+  // background
+  ctx0.fillStyle=`rgba(${BACKGROUND_RGBA[0]},${BACKGROUND_RGBA[1]},${BACKGROUND_RGBA[2]},${BACKGROUND_RGBA[3]/255})`;
   ctx0.fillRect(0,0,W,H);
-  let imgData = ctx0.getImageData(0,0,W,H);
-  const D = imgData.data;
+  let imgData=ctx0.getImageData(0,0,W,H);
+  const D=imgData.data;
 
-  const eyeY = ROOM.eyeY;
-  const L = LIGHT_DIR_WORLD; // normalized already
+  const lights = buildDownlights(planes);
 
-  for (let y=0; y<H; y++){
-    const pitch = 90 - (y + 0.5) * 180 / H;
-    for (let x=0; x<W; x++){
-      const yaw = (x + 0.5) * 360 / W - 180;
-      const ray = dirFromYawPitch(yaw, pitch);   // from eye (0,eyeY,0)
+  for(let y=0;y<H;y++){
+    const pitch = 90 - (y+0.5)*180/H;
+    for(let x=0;x<W;x++){
+      const yaw = (x+0.5)*360/W - 180;
+      const ray = dirFromYawPitch(yaw, pitch);
 
       let bestT = Infinity;
       let hit = null;
 
-      for (const pl of planes){
+      for(const pl of planes){
         const n_dot_d = dot(pl.N, ray);
         if (Math.abs(n_dot_d) <= 1e-9) continue;
 
-        const t = dot(pl.N, [pl.p[0], pl.p[1]-eyeY, pl.p[2]]) / n_dot_d;
+        const t = dot(pl.N, [pl.p[0], pl.p[1]-ROOM.eyeY, pl.p[2]]) / n_dot_d;
         if (t <= 0 || t >= bestT) continue;
 
-        const Hx = t*ray[0], Hy = eyeY + t*ray[1], Hz = t*ray[2];
+        const Hx = t*ray[0], Hy = ROOM.eyeY + t*ray[1], Hz = t*ray[2];
         const rel = [Hx - pl.p[0], Hy - pl.p[1], Hz - pl.p[2]];
-        const cu = dot(rel, pl.T);
-        const cv = dot(rel, pl.B);
+        const cu = dot(rel, pl.T), cv = dot(rel, pl.B);
         if (Math.abs(cu) > pl.hu || Math.abs(cv) > pl.hv) continue;
 
         const u = (cu + pl.hu) / (2*pl.hu);
-        const v = (pl.hv - cv) / (2*pl.hv); // top->bottom
+        const v = (pl.hv - cv) / (2*pl.hv);
         bestT = t;
-        hit = { pl, u, v, viewDir: normalize(mul(ray, -1)) }; // V points toward camera
+        hit = { pl, u, v, P:[Hx,Hy,Hz], V: normalize(mul(ray,-1)) };
       }
 
-      if (!hit) continue; // background already filled
-
+      if (!hit) continue;
       const tex = textures[hit.pl.id];
       if (!tex) continue;
 
-      // Albedo
       let [r,g,b,a] = sampleColor(tex, hit.u, hit.v);
-      if (a === 0) continue;
+      if (a===0) continue;
 
-      // Base normal in world = plane normal
+      // base normal in world
       let Nw = hit.pl.N;
-
-      // Normal/bump?
       if (tex.normal){
-        const Nt = sampleNormal(tex, hit.u, hit.v);     // tangent space
-        // Tangent frame (T,B,N) -> world
-        const T = hit.pl.T, B = hit.pl.B, N = hit.pl.N;
+        const Nt = sampleNormal(tex, hit.u, hit.v);
         Nw = normalize([
-          T[0]*Nt[0] + B[0]*Nt[1] + N[0]*Nt[2],
-          T[1]*Nt[0] + B[1]*Nt[1] + N[1]*Nt[2],
-          T[2]*Nt[0] + B[2]*Nt[1] + N[2]*Nt[2]
+          hit.pl.T[0]*Nt[0] + hit.pl.B[0]*Nt[1] + hit.pl.N[0]*Nt[2],
+          hit.pl.T[1]*Nt[0] + hit.pl.B[1]*Nt[1] + hit.pl.N[1]*Nt[2],
+          hit.pl.T[2]*Nt[0] + hit.pl.B[2]*Nt[1] + hit.pl.N[2]*Nt[2]
         ]);
-      } else if (tex.bump){
-        const Nt = sampleBump(tex, hit.u, hit.v);       // from height → tangent normal
-        const T = hit.pl.T, B = hit.pl.B, N = hit.pl.N;
+      }else if (tex.bump){
+        const Nt = sampleBump(tex, hit.u, hit.v);
         Nw = normalize([
-          T[0]*Nt[0] + B[0]*Nt[1] + N[0]*Nt[2],
-          T[1]*Nt[0] + B[1]*Nt[1] + N[1]*Nt[2],
-          T[2]*Nt[0] + B[2]*Nt[1] + N[2]*Nt[2]
+          hit.pl.T[0]*Nt[0] + hit.pl.B[0]*Nt[1] + hit.pl.N[0]*Nt[2],
+          hit.pl.T[1]*Nt[0] + hit.pl.B[1]*Nt[1] + hit.pl.N[1]*Nt[2],
+          hit.pl.T[2]*Nt[0] + hit.pl.B[2]*Nt[1] + hit.pl.N[2]*Nt[2]
         ]);
       }
 
-      // Lighting
-      const ndl = Math.max(0, dot(Nw, L));
-      const diffuse = DIFFUSE * ndl;
+      // Lighting: ambient + sum of downlights + specular
+      let Lsum = AMBIENT;
       let spec = 0.0;
-      if (SPECULAR > 0 && ndl > 0){
-        const R = reflect(mul(L,-1), Nw);
-        const rv = Math.max(0, dot(R, hit.viewDir));
-        spec = SPECULAR * Math.pow(rv, SHININESS);
+
+      for (const Lsrc of lights){
+        const contrib = softSpot(Lsrc, hit.P, Nw);
+        if (contrib <= 0) continue;
+        Lsum += contrib;
+
+        if (SPECULAR > 0){
+          const Ldir = normalize(sub(Lsrc.pos, hit.P)); // from point to light
+          const R = reflect(mul(Ldir,-1), Nw);
+          const rv = Math.max(0, dot(R, hit.V));
+          spec += SPECULAR * Math.pow(rv, SHININESS) * contrib;
+        }
       }
-      const lit = Math.min(1.0, AMBIENT + diffuse + spec);
+
+      Lsum = Math.min(1.5, Lsum); // gentle clamp
 
       const di = (y*W + x)*4;
-      D[di  ] = Math.round((r) * lit);
-      D[di+1] = Math.round((g) * lit);
-      D[di+2] = Math.round((b) * lit);
+      D[di  ] = Math.round(r * Lsum + 255 * spec);
+      D[di+1] = Math.round(g * Lsum + 255 * spec);
+      D[di+2] = Math.round(b * Lsum + 255 * spec);
       D[di+3] = a;
     }
   }
 
-  // Commit & downscale
-  ctx0.putImageData(imgData, 0, 0);
-  if (SUPERSAMPLE !== 1.0){
-    const final = document.createElement('canvas');
-    final.width = W0; final.height = H0;
-    const fx = final.getContext('2d');
-    fx.imageSmoothingEnabled = true;
-    fx.drawImage(cvs, 0,0, W, H, 0,0, W0, H0);
-    cvs.width = W0; cvs.height = H0;
-    const gx = cvs.getContext('2d');
-    gx.drawImage(final, 0, 0);
+  // commit + downscale
+  ctx0.putImageData(imgData,0,0);
+  if (SUPERSAMPLE!==1.0){
+    const final=document.createElement('canvas');
+    final.width=OUTPUT.width; final.height=OUTPUT.height;
+    const fx=final.getContext('2d'); fx.imageSmoothingEnabled=true;
+    fx.drawImage(cvs,0,0,W,H,0,0,final.width,final.height);
+    cvs.width=final.width; cvs.height=final.height;
+    const gx=cvs.getContext('2d'); gx.drawImage(final,0,0);
   }
 
-  const blob = await new Promise(res => el('#bake').toBlob(res, "image/png", 0.95));
+  const blob = await new Promise(res => el('#bake').toBlob(res,"image/png",0.95));
   return URL.createObjectURL(blob);
 }
 
@@ -375,7 +423,7 @@ function startViewer(panoUrl){
 /* ---------- go ---------- */
 (async function main(){
   try{
-    toast('Baking with bump/normal lighting…');
+    toast('Baking with soft downlights…');
     const url = await bakeRoom();
     toast('Starting viewer…');
     startViewer(url);
