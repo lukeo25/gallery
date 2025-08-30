@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Gallery Zero (no lighting)</title>
+<title>Gallery Zero (no lighting, local walls)</title>
 
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css">
 <script src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js"></script>
@@ -39,18 +39,28 @@
 
 <script>
 /* ===================== CONFIG (no lighting) ===================== */
-const GH_USER = "lukeo25";
-const GH_REPO = "gallery";
-const WALLS_API = `https://api.github.com/repos/${GH_USER}/${GH_REPO}/contents/walls`;
-
 const ROOM = { width: 10.0, depth: 10.0, height: 3.0, eyeY: 1.6 };
-const GLOBAL_YAW_DEG = 0;     // rotate whole room if your imagery is offset
-const SHIFT_Y_M = 0.0;        // vertical offset of the room
+const GLOBAL_YAW_DEG = 0;
+const SHIFT_Y_M = 0.0;
 
-const OUTPUT = { width: 4096, height: 2048 }; // equirectangular size
-const SUPERSAMPLE = 1.25;     // >1.0 for sharper bake
+const OUTPUT = { width: 4096, height: 2048 };
+const SUPERSAMPLE = 1.25;
 const USE_BILINEAR = true;
-const BACKGROUND_RGBA = [255,255,255,255]; // white background (unused areas)
+const BACKGROUND_RGBA = [255,255,255,255];
+
+/* — Load walls directly from SAME ORIGIN —
+   Folder layout on GitHub Pages:
+   /gallery/index.html  (this file)
+   /gallery/walls/north.png ... roof.png
+*/
+const WALL_URLS = {
+  west:  new URL('./walls/west.png',  location.href).href,
+  east:  new URL('./walls/east.png',  location.href).href,
+  north: new URL('./walls/north.png', location.href).href,
+  south: new URL('./walls/south.png', location.href).href,
+  floor: new URL('./walls/floor.png', location.href).href,
+  roof:  new URL('./walls/roof.png',  location.href).href,
+};
 /* =============================================================== */
 
 const el = q => document.querySelector(q);
@@ -89,33 +99,26 @@ function sampleBilinear(S, sw, sh, u, v){
   return [ Math.round(lerp(r0,r1,dy)), Math.round(lerp(g0,g1,dy)), Math.round(lerp(b0,b1,dy)), Math.round(lerp(a0,a1,dy)) ];
 }
 
-/* ---------- repo helpers ---------- */
-async function listPngs(folderApi){
-  const r = await fetch(folderApi, { cache:'no-store' });
-  if(!r.ok){ if(r.status===404) return []; throw new Error("GitHub API "+r.status); }
-  const files = await r.json();
-  return files.filter(f=>f.type==="file" && /\.png$/i.test(f.name))
-              .map(f=>({ name:f.name.toLowerCase(), url:f.download_url }));
-}
+/* ---------- image loader (same-origin; no crossOrigin needed) ---------- */
 function loadImage(src){
   return new Promise((res,rej)=>{
-    const img=new Image(); img.crossOrigin="anonymous";
-    img.onload=()=>res(img); img.onerror=()=>rej(new Error("img "+src));
+    const img=new Image();
+    img.onload=()=>res(img);
+    img.onerror=()=>rej(new Error("img "+src));
     img.src=src;
   });
 }
 
-/* ---------- planes (room) ---------- */
+/* ---------- planes ---------- */
 function buildPlanes(){
   const hw = ROOM.width/2, hd = ROOM.depth/2, hh = ROOM.height/2;
   const base = [
-    // id, normal(n), tangent(u = +along), bitangent(v = +up), center p, half extents (hu,hv), texture filename
-    { id:"west",  n:[+1,0,0], u:[0,0,+1],  v:[0,1,0],    p:[-hw, hh, 0],        hu:hd, hv:hh, png:"west.png"  },
-    { id:"east",  n:[-1,0,0], u:[0,0,-1],  v:[0,1,0],    p:[+hw, hh, 0],        hu:hd, hv:hh, png:"east.png"  },
-    { id:"north", n:[0,0,+1], u:[+1,0,0],  v:[0,1,0],    p:[0, hh, -hd],        hu:hw, hv:hh, png:"north.png" },
-    { id:"south", n:[0,0,-1], u:[-1,0,0],  v:[0,1,0],    p:[0, hh, +hd],        hu:hw, hv:hh, png:"south.png" },
-    { id:"floor", n:[0,1,0],  u:[+1,0,0],  v:[0,0,+1],   p:[0, 0, 0],           hu:hw, hv:hd, png:"floor.png" },
-    { id:"roof",  n:[0,-1,0], u:[+1,0,0],  v:[0,0,+1],   p:[0, ROOM.height, 0], hu:hw, hv:hd, png:"roof.png"  }
+    { id:"west",  n:[+1,0,0], u:[0,0,+1],  v:[0,1,0],    p:[-hw, hh, 0],        hu:hd, hv:hh, file:"west"  },
+    { id:"east",  n:[-1,0,0], u:[0,0,-1],  v:[0,1,0],    p:[+hw, hh, 0],        hu:hd, hv:hh, file:"east"  },
+    { id:"north", n:[0,0,+1], u:[+1,0,0],  v:[0,1,0],    p:[0, hh, -hd],        hu:hw, hv:hh, file:"north" },
+    { id:"south", n:[0,0,-1], u:[-1,0,0],  v:[0,1,0],    p:[0, hh, +hd],        hu:hw, hv:hh, file:"south" },
+    { id:"floor", n:[0,1,0],  u:[+1,0,0],  v:[0,0,+1],   p:[0, 0, 0],           hu:hw, hv:hd, file:"floor" },
+    { id:"roof",  n:[0,-1,0], u:[+1,0,0],  v:[0,0,+1],   p:[0, ROOM.height, 0], hu:hw, hv:hd, file:"roof"  }
   ];
   return base.map(pl=>{
     const n = normalize(rotateY(pl.n, GLOBAL_YAW_DEG));
@@ -128,26 +131,26 @@ function buildPlanes(){
 }
 
 /* ---------- textures ---------- */
-async function loadPlaneTextures(map, planes){
+async function loadPlaneTextures(planes){
   const tex = {};
   for (const pl of planes){
-    const colorUrl = map[pl.png];
-    if (!colorUrl) continue;
-
-    const imgC = await loadImage(colorUrl);
-    const cC = document.createElement('canvas');
-    cC.width  = Math.max(1, Math.round(imgC.naturalWidth  * SUPERSAMPLE));
-    cC.height = Math.max(1, Math.round(imgC.naturalHeight * SUPERSAMPLE));
-    const cx = cC.getContext('2d'); cx.imageSmoothingEnabled = true;
-    cx.drawImage(imgC, 0,0, cC.width, cC.height);
-    const C = cx.getImageData(0,0,cC.width,cC.height).data;
-
-    tex[pl.id] = { color:{data:C,w:cC.width,h:cC.height} }; // no normal/bump used in lighting-free bake
+    const url = WALL_URLS[pl.file];
+    try{
+      const img = await loadImage(url);
+      const c = document.createElement('canvas');
+      c.width  = Math.max(1, Math.round(img.naturalWidth  * SUPERSAMPLE));
+      c.height = Math.max(1, Math.round(img.naturalHeight * SUPERSAMPLE));
+      const cx = c.getContext('2d'); cx.imageSmoothingEnabled = true;
+      cx.drawImage(img, 0,0, c.width, c.height);
+      tex[pl.id] = { color: cx.getImageData(0,0,c.width,c.height) };
+    }catch(e){
+      console.warn("Missing wall image:", pl.file + ".png");
+    }
   }
   return tex;
 }
 
-/* ---------- raycast to planes (for panorama bake) ---------- */
+/* ---------- raycast ---------- */
 function intersectRayPlanes(ray, planes){
   let bestT = Infinity, hit = null;
   for(const pl of planes){
@@ -169,9 +172,9 @@ function intersectRayPlanes(ray, planes){
   return hit;
 }
 
-/* ---------- sampling helpers ---------- */
-function sampleColor(tex, u, v){
-  const {data,w,h} = tex.color;
+/* ---------- sampling ---------- */
+function sampleColor(texImageData, u, v){
+  const data=texImageData.data, w=texImageData.width, h=texImageData.height;
   if (USE_BILINEAR) return sampleBilinear(data, w, h, u, v);
   const sx=Math.min(w-1,Math.max(0,Math.floor(u*w)));
   const sy=Math.min(h-1,Math.max(0,Math.floor(v*h)));
@@ -179,7 +182,7 @@ function sampleColor(tex, u, v){
   return [data[si],data[si+1],data[si+2],data[si+3]];
 }
 
-/* ---------- bake: colour only (no lighting) ---------- */
+/* ---------- bake: colour only ---------- */
 function bakeColourOnly(planes, textures){
   const W0=OUTPUT.width, H0=OUTPUT.height;
   const W=Math.max(1,Math.round(W0*SUPERSAMPLE));
@@ -205,7 +208,7 @@ function bakeColourOnly(planes, textures){
       const tex = textures[hit.pl.id];
       if (!tex){ D[di+3]=0; continue; }
 
-      const [r,g,b,a] = sampleColor(tex, hit.u, hit.v);
+      const [r,g,b,a] = sampleColor(tex.color, hit.u, hit.v);
       D[di  ] = r;
       D[di+1] = g;
       D[di+2] = b;
@@ -226,87 +229,12 @@ function bakeColourOnly(planes, textures){
   return cvs;
 }
 
-/* ---------- optional exporters (normals/height for reference) ---------- */
-function bakeNormalWorld(planes){
-  const W0=OUTPUT.width, H0=OUTPUT.height;
-  const W=Math.max(1,Math.round(W0*SUPERSAMPLE));
-  const H=Math.max(1,Math.round(H0*SUPERSAMPLE));
-  const cvs=el('#bake'); cvs.width=W; cvs.height=H;
-  const ctx=cvs.getContext('2d',{willReadFrequently:true});
-  const img = ctx.getImageData(0,0,W,H);
-  const D = img.data;
-
-  for(let y=0;y<H;y++){
-    const pitch = 90 - (y+0.5)*180/H;
-    for(let x=0;x<W;x++){
-      const yaw = (x+0.5)*360/W - 180;
-      const ray = dirFromYawPitch(yaw, pitch);
-      const hit = intersectRayPlanes(ray, planes);
-      const di = (y*W + x)*4;
-
-      if(!hit){ D[di+3]=0; continue; }
-
-      const N = hit.pl.N;
-      D[di  ] = Math.round((N[0]*0.5 + 0.5)*255);
-      D[di+1] = Math.round((N[1]*0.5 + 0.5)*255);
-      D[di+2] = Math.round((N[2]*0.5 + 0.5)*255);
-      D[di+3] = 255;
-    }
-  }
-  ctx.putImageData(img,0,0);
-  if (SUPERSAMPLE!==1.0){
-    const final=document.createElement('canvas');
-    final.width=W0; final.height=H0;
-    const fx=final.getContext('2d'); fx.imageSmoothingEnabled=true;
-    fx.drawImage(cvs,0,0,W,H,0,0,W0,H0);
-    cvs.width=W0; cvs.height=H0;
-    const gx=cvs.getContext('2d'); gx.drawImage(final,0,0);
-  }
-  return cvs;
-}
-
-function bakeFlatHeight(planes){
-  // simple 50% gray height everywhere; change if you keep per-wall height maps
-  const W0=OUTPUT.width, H0=OUTPUT.height;
-  const W=Math.max(1,Math.round(W0*SUPERSAMPLE));
-  const H=Math.max(1,Math.round(H0*SUPERSAMPLE));
-  const cvs=el('#bake'); cvs.width=W; cvs.height=H;
-  const ctx=cvs.getContext('2d',{willReadFrequently:true});
-  const img = ctx.getImageData(0,0,W,H);
-  const D = img.data;
-
-  for(let i=0;i<W*H;i++){
-    const di=i*4; D[di]=128; D[di+1]=128; D[di+2]=128; D[di+3]=255;
-  }
-  ctx.putImageData(img,0,0);
-  if (SUPERSAMPLE!==1.0){
-    const final=document.createElement('canvas');
-    final.width=W0; final.height=H0;
-    const fx=final.getContext('2d'); fx.imageSmoothingEnabled=true;
-    fx.drawImage(cvs,0,0,W,H,0,0,W0,H0);
-    cvs.width=W0; cvs.height=H0;
-    const gx=cvs.getContext('2d'); gx.drawImage(final,0,0);
-  }
-  return cvs;
-}
-
-/* ---------- IO helpers ---------- */
-async function listAndLoad(){
-  const files = await listPngs(WALLS_API);
-  const map = Object.create(null);
-  files.forEach(f => map[f.name] = f.url);
-  const planes = buildPlanes();
-  const textures = await loadPlaneTextures(map, planes);
-  return { planes, textures };
-}
-function canvasToBlobURL(canvas){
-  return new Promise(res => canvas.toBlob(b => res(URL.createObjectURL(b)), "image/png", 0.95));
-}
+/* ---------- downloads ---------- */
+function canvasToBlobURL(canvas){ return new Promise(res=>canvas.toBlob(b=>res(URL.createObjectURL(b)),"image/png",0.95)); }
 async function downloadCanvas(canvas, filename){
   const url = await canvasToBlobURL(canvas);
-  const a = document.createElement('a');
-  a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
-  URL.revokeObjectURL(url);
+  const a = document.createElement('a'); a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
 
 /* ---------- viewer ---------- */
@@ -325,9 +253,10 @@ function startViewer(panoUrl){
 let cachedBakeURL = null;
 (async function main(){
   try{
-    toast('Loading wall textures…');
-    const { planes, textures } = await listAndLoad();
-    toast('Baking equirectangular (no lighting)…');
+    toast('Loading walls locally…');
+    const planes = buildPlanes();
+    const textures = await loadPlaneTextures(planes);
+    toast('Baking equirectangular…');
     const colorCanvas = bakeColourOnly(planes, textures);
     cachedBakeURL = await canvasToBlobURL(colorCanvas);
     startViewer(cachedBakeURL);
@@ -338,16 +267,57 @@ let cachedBakeURL = null;
       toast('Colour (EQ) saved');
     };
     document.getElementById('dlNormal').onclick = async ()=>{
-      await downloadCanvas(bakeNormalWorld(planes), 'gallery_zero_normal_world.png');
+      // world-space flat normals per face (useful for debug)
+      const W0=OUTPUT.width, H0=OUTPUT.height;
+      const W=Math.max(1,Math.round(W0*SUPERSAMPLE));
+      const H=Math.max(1,Math.round(H0*SUPERSAMPLE));
+      const cvs=el('#bake'); cvs.width=W; cvs.height=H;
+      const ctx=cvs.getContext('2d',{willReadFrequently:true});
+      const img=ctx.getImageData(0,0,W,H),D=img.data;
+      for(let y=0;y<H;y++){
+        const pitch=90-(y+0.5)*180/H;
+        for(let x=0;x<W;x++){
+          const yaw=(x+0.5)*360/W-180;
+          const ray=dirFromYawPitch(yaw,pitch);
+          const hit=intersectRayPlanes(ray,planes);
+          const di=(y*W+x)*4;
+          if(!hit){D[di+3]=0;continue;}
+          const N=hit.pl.N;
+          D[di]=Math.round((N[0]*.5+.5)*255);
+          D[di+1]=Math.round((N[1]*.5+.5)*255);
+          D[di+2]=Math.round((N[2]*.5+.5)*255);
+          D[di+3]=255;
+        }
+      }
+      ctx.putImageData(img,0,0);
+      if(SUPERSAMPLE!==1.0){
+        const f=document.createElement('canvas');f.width=W0;f.height=H0;
+        const fx=f.getContext('2d');fx.imageSmoothingEnabled=true;fx.drawImage(cvs,0,0,W,H,0,0,W0,H0);
+        cvs.width=W0;cvs.height=H0;cvs.getContext('2d').drawImage(f,0,0);
+      }
+      await downloadCanvas(cvs,'gallery_zero_normal_world.png');
       toast('Normal (EQ) saved');
     };
     document.getElementById('dlHeight').onclick = async ()=>{
-      await downloadCanvas(bakeFlatHeight(planes), 'gallery_zero_height.png');
+      const W0=OUTPUT.width, H0=OUTPUT.height;
+      const W=Math.max(1,Math.round(W0*SUPERSAMPLE));
+      const H=Math.max(1,Math.round(H0*SUPERSAMPLE));
+      const cvs=el('#bake'); cvs.width=W; cvs.height=H;
+      const ctx=cvs.getContext('2d',{willReadFrequently:true});
+      const img=ctx.createImageData(W,H),D=img.data;
+      for(let i=0;i<W*H;i++){const di=i*4;D[di]=128;D[di+1]=128;D[di+2]=128;D[di+3]=255;}
+      ctx.putImageData(img,0,0);
+      if(SUPERSAMPLE!==1.0){
+        const f=document.createElement('canvas');f.width=W0;f.height=H0;
+        const fx=f.getContext('2d');fx.imageSmoothingEnabled=true;fx.drawImage(cvs,0,0,W,H,0,0,W0,H0);
+        cvs.width=W0;cvs.height=H0;cvs.getContext('2d').drawImage(f,0,0);
+      }
+      await downloadCanvas(cvs,'gallery_zero_height.png');
       toast('Height (EQ) saved');
     };
   }catch(err){
     console.error(err);
-    toast('Setup failed. Check /walls names & repo visibility.');
+    toast('Setup failed. Confirm /walls filenames & case are correct.');
   }
 })();
 </script>
