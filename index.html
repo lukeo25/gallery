@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Gallery Zero</title>
+<title>Gallery Zero (no lighting)</title>
 
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css">
 <script src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js"></script>
@@ -30,7 +30,6 @@
       <button id="dlColor" class="btn">Download Colour (EQ)</button>
       <button id="dlNormal" class="btn">Download Normal (EQ)</button>
       <button id="dlHeight" class="btn">Download Height (EQ)</button>
-      <button id="dlLit" class="btn">Download Lit Pano</button>
     </div>
   </header>
 
@@ -39,47 +38,20 @@
   <div id="toast" class="toast"></div>
 
 <script>
-/* ===================== CONFIG ===================== */
+/* ===================== CONFIG (no lighting) ===================== */
 const GH_USER = "lukeo25";
 const GH_REPO = "gallery";
 const WALLS_API = `https://api.github.com/repos/${GH_USER}/${GH_REPO}/contents/walls`;
 
 const ROOM = { width: 10.0, depth: 10.0, height: 3.0, eyeY: 1.6 };
-const GLOBAL_YAW_DEG = 0;
-const SHIFT_Y_M = 0.0;
+const GLOBAL_YAW_DEG = 0;     // rotate whole room if your imagery is offset
+const SHIFT_Y_M = 0.0;        // vertical offset of the room
 
-const OUTPUT = { width: 4096, height: 2048 };   // equirect size
-const SUPERSAMPLE = 1.25;
+const OUTPUT = { width: 4096, height: 2048 }; // equirectangular size
+const SUPERSAMPLE = 1.25;     // >1.0 for sharper bake
 const USE_BILINEAR = true;
-const BACKGROUND_RGBA = [255,255,255,255];
-
-/* ===== Lighting: 9 fixtures per wall, aimed to a higher band ===== */
-const AMBIENT = 0.62;               // base fill
-
-// target band height (meters from floor) to light across each wall
-const WASH_BAND_Y_M = 1.80;         // <- raise/lower this to move the lit band
-
-const DOWNLIGHTS = {
-  perWall: 9,                       // <- more fixtures per wall
-  endMarginM: 0.70,                 // keep away from corners
-  offWallM: 0.06,                   // fixture sits slightly off the wall (toward room)
-  belowCeilingM: 0.03,              // mount just below ceiling
-  coneAngleDeg: 52,                 // a bit wider to overlap evenly
-  featherDeg: 18,                   // soft edge
-  intensity: 2.9,                   // brightness per light
-  range: 4.8                        // reach to floor
-};
-
-const SPECULAR = 0.10;
-const SHININESS = 28.0;
-
-const SHADOWS = false;              // set true for occlusion if desired
-const SHADOW_EPS = 1e-3;
-
-/* Bump/Normal helpers (for lit pano; exporters ignore lighting) */
-const BUMP_SCALE = 1.5;
-const BUMP_EPS = 1.0/1024.0;
-/* =================================================== */
+const BACKGROUND_RGBA = [255,255,255,255]; // white background (unused areas)
+/* =============================================================== */
 
 const el = q => document.querySelector(q);
 function toast(msg,ms=1800){ const t=el('#toast'); t.textContent=msg; t.style.display='block'; clearTimeout(toast._h); toast._h=setTimeout(()=>t.style.display='none',ms); }
@@ -91,7 +63,6 @@ function dot(a,b){ return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
 function add(a,b){ return [a[0]+b[0],a[1]+b[1],a[2]+b[2]]; }
 function sub(a,b){ return [a[0]-b[0],a[1]-b[1],a[2]-b[2]]; }
 function mul(a,k){ return [a[0]*k,a[1]*k,a[2]*k]; }
-function reflect(I,N){ const dn=dot(I,N); return sub(I, mul(N,2*dn)); }
 function dirFromYawPitch(yawDeg,pitchDeg){
   const y=yawDeg*D2R, p=pitchDeg*D2R;
   const cp=Math.cos(p), sp=Math.sin(p), cy=Math.cos(y), sy=Math.sin(y);
@@ -134,10 +105,11 @@ function loadImage(src){
   });
 }
 
-/* ---------- planes ---------- */
+/* ---------- planes (room) ---------- */
 function buildPlanes(){
   const hw = ROOM.width/2, hd = ROOM.depth/2, hh = ROOM.height/2;
   const base = [
+    // id, normal(n), tangent(u = +along), bitangent(v = +up), center p, half extents (hu,hv), texture filename
     { id:"west",  n:[+1,0,0], u:[0,0,+1],  v:[0,1,0],    p:[-hw, hh, 0],        hu:hd, hv:hh, png:"west.png"  },
     { id:"east",  n:[-1,0,0], u:[0,0,-1],  v:[0,1,0],    p:[+hw, hh, 0],        hu:hd, hv:hh, png:"east.png"  },
     { id:"north", n:[0,0,+1], u:[+1,0,0],  v:[0,1,0],    p:[0, hh, -hd],        hu:hw, hv:hh, png:"north.png" },
@@ -162,9 +134,6 @@ async function loadPlaneTextures(map, planes){
     const colorUrl = map[pl.png];
     if (!colorUrl) continue;
 
-    const normalUrl = map[pl.png.replace('.png','_n.png')];
-    const bumpUrl   = map[pl.png.replace('.png','_b.png')];
-
     const imgC = await loadImage(colorUrl);
     const cC = document.createElement('canvas');
     cC.width  = Math.max(1, Math.round(imgC.naturalWidth  * SUPERSAMPLE));
@@ -173,156 +142,12 @@ async function loadPlaneTextures(map, planes){
     cx.drawImage(imgC, 0,0, cC.width, cC.height);
     const C = cx.getImageData(0,0,cC.width,cC.height).data;
 
-    let N=null, B=null;
-    if (normalUrl){
-      try{
-        const imgN=await loadImage(normalUrl);
-        const cN=document.createElement('canvas');
-        cN.width=Math.max(1,Math.round(imgN.naturalWidth*SUPERSAMPLE));
-        cN.height=Math.max(1,Math.round(imgN.naturalHeight*SUPERSAMPLE));
-        const nx=cN.getContext('2d'); nx.imageSmoothingEnabled=true;
-        nx.drawImage(imgN,0,0,cN.width,cN.height);
-        N = nx.getImageData(0,0,cN.width,cN.height).data;
-      }catch(e){}
-    }
-    if (!N && bumpUrl){
-      try{
-        const imgB=await loadImage(bumpUrl);
-        const cB=document.createElement('canvas');
-        cB.width=cC.width; cB.height=cC.height;
-        const bx=cB.getContext('2d'); bx.imageSmoothingEnabled=true;
-        bx.drawImage(imgB,0,0,cB.width,cB.height);
-        B = bx.getImageData(0,0,cB.width,cB.height).data;
-      }catch(e){}
-    }
-    tex[pl.id] = { color:{data:C,w:cC.width,h:cC.height}, normal: N?{data:N,w:cC.width,h:cC.height}:null, bump: B?{data:B,w:cC.width,h:cC.height}:null };
+    tex[pl.id] = { color:{data:C,w:cC.width,h:cC.height} }; // no normal/bump used in lighting-free bake
   }
   return tex;
 }
 
-/* ---------- WALL-WASHERS aimed at a higher band ---------- */
-function buildDownlights(planes){
-  const lights = [];
-  const walls = planes.filter(p => p.id==="north" || p.id==="south" || p.id==="east" || p.id==="west");
-
-  const cone = DOWNLIGHTS.coneAngleDeg * D2R;
-  const feather = DOWNLIGHTS.featherDeg * D2R;
-
-  for (const w of walls){
-    const fullSpan = w.hu * 2;
-    const usable = Math.max(0, fullSpan - 2*DOWNLIGHTS.endMarginM);
-    const start = -usable/2;
-
-    for (let i=0;i<DOWNLIGHTS.perWall;i++){
-      const t = (i + 0.5) / DOWNLIGHTS.perWall;
-      const along = start + usable * t;
-
-      // mount near the ceiling, slightly out from the wall
-      const nearCeiling = add(w.p, mul(w.B, w.hv));
-      const downFromEdge = add(nearCeiling, mul(w.B, -DOWNLIGHTS.belowCeilingM));
-      const offWall = add(downFromEdge, mul(w.N, -DOWNLIGHTS.offWallM));
-      const pos = add(offWall, mul(w.T, along));
-
-      // target a point on the wall at the desired band height
-      const clampY = Math.max(0.05, Math.min(ROOM.height - 0.05, WASH_BAND_Y_M));
-      const targetLocal = [ w.p[0], clampY, w.p[2] ];
-      const targetAlong = add(targetLocal, mul(w.T, along));
-      const target = add(targetAlong, mul(w.N, 1e-3));
-
-      const dir = normalize(sub(target, pos)); // light -> point
-
-      lights.push({
-        pos,
-        dir,
-        cone,
-        feather,
-        intensity: DOWNLIGHTS.intensity,
-        range: DOWNLIGHTS.range
-      });
-    }
-  }
-  return lights;
-}
-
-/* ---------- lighting math ---------- */
-function spotContribution(light, P, N){
-  const LP = sub(P, light.pos);
-  const dist = Math.hypot(LP[0],LP[1],LP[2]);
-  if (dist <= 1e-6 || dist > light.range) return 0.0;
-
-  const V = normalize(LP);             // light -> point (cone test)
-  const L = normalize(mul(V, -1));     // point -> light (lambert)
-
-  const cosA = dot(V, normalize(light.dir));
-  const angle = Math.acos(Math.max(-1, Math.min(1, cosA)));
-  if (angle > light.cone) return 0.0;
-
-  const inner = Math.max(0, light.cone - light.feather);
-  let spot = 1.0;
-  if (angle > inner){
-    const t = (light.cone - angle) / (light.cone - inner);
-    spot = t*t*(3 - 2*t);
-  }
-
-  const lambert = Math.max(0, dot(N, L));
-  const att = Math.max(0, 1.0 - (dist / light.range));
-  const fall = att*att;
-  return light.intensity * lambert * spot * fall;
-}
-
-function visibleFromLight(light, P, planes, selfPlane){
-  if (!SHADOWS) return 1.0;
-  const LP = sub(P, light.pos);
-  const distLP = Math.hypot(LP[0],LP[1],LP[2]);
-  const d = normalize(LP);
-  for (const pl of planes){
-    if (pl === selfPlane) continue;
-    const n_dot_d = dot(pl.N, d);
-    if (Math.abs(n_dot_d) <= 1e-9) continue;
-    const t = dot(pl.N, [pl.p[0]-light.pos[0], pl.p[1]-light.pos[1], pl.p[2]-light.pos[2]]) / n_dot_d;
-    if (t <= SHADOW_EPS || t >= distLP - SHADOW_EPS) continue;
-
-    const Hx = light.pos[0] + t*d[0];
-    const Hy = light.pos[1] + t*d[1];
-    const Hz = light.pos[2] + t*d[2];
-    const rel = [Hx - pl.p[0], Hy - pl.p[1], Hz - pl.p[2]];
-    const cu = dot(rel, pl.T), cv = dot(rel, pl.B);
-    if (Math.abs(cu) <= pl.hu && Math.abs(cv) <= pl.hv) return 0.0;
-  }
-  return 1.0;
-}
-
-/* ---------- shading helpers ---------- */
-function sampleColor(tex, u, v){
-  const {data,w,h} = tex.color;
-  if (USE_BILINEAR) return sampleBilinear(data, w, h, u, v);
-  const sx=Math.min(w-1,Math.max(0,Math.floor(u*w)));
-  const sy=Math.min(h-1,Math.max(0,Math.floor(v*h)));
-  const si=(sy*w+sx)*4;
-  return [data[si],data[si+1],data[si+2],data[si+3]];
-}
-function sampleNormal(tex, u, v){
-  const {data,w,h} = tex.normal;
-  const [r,g,b] = USE_BILINEAR ? sampleBilinear(data,w,h,u,v) : (()=>{const sx=Math.min(w-1,Math.max(0,Math.floor(u*w))); const sy=Math.min(h-1,Math.max(0,Math.floor(v*h))); const si=(sy*w+sx)*4; return [data[si],data[si+1],data[si+2]];})();
-  const nx = (r/255)*2-1, ny=(g/255)*2-1, nz=(b/255)*2-1;
-  return normalize([nx, ny, nz]);
-}
-function sampleBump(tex, u, v){
-  const {data,w,h} = tex.bump;
-  function height(U,V){
-    const fx=Math.max(0,Math.min(w-1,U*(w-1)));
-    const fy=Math.max(0,Math.min(h-1,V*(h-1)));
-    const x=Math.round(fx), y=Math.round(fy);
-    const i=(y*w+x)*4;
-    return data[i]*0.299 + data[i+1]*0.587 + data[i+2]*0.114;
-  }
-  const du=BUMP_EPS, dv=BUMP_EPS;
-  const hC=height(u,v), hR=height(Math.min(1,u+du),v), hU=height(u,Math.max(0,v-dv));
-  const dhdu=(hR-hC)/255.0, dhdv=(hU-hC)/255.0;
-  return normalize([ -BUMP_SCALE*dhdu, -BUMP_SCALE*dhdv, 1.0 ]);
-}
-
-/* ---------- RAYCAST ---------- */
+/* ---------- raycast to planes (for panorama bake) ---------- */
 function intersectRayPlanes(ray, planes){
   let bestT = Infinity, hit = null;
   for(const pl of planes){
@@ -339,13 +164,23 @@ function intersectRayPlanes(ray, planes){
     const u = (cu + pl.hu) / (2*pl.hu);
     const v = (pl.hv - cv) / (2*pl.hv);
     bestT = t;
-    hit = { pl, u, v, P:[Hx,Hy,Hz], V: normalize(mul(ray,-1)) };
+    hit = { pl, u, v };
   }
   return hit;
 }
 
-/* ---------- BAKERS ---------- */
-function bakeLit(planes, textures, lights){
+/* ---------- sampling helpers ---------- */
+function sampleColor(tex, u, v){
+  const {data,w,h} = tex.color;
+  if (USE_BILINEAR) return sampleBilinear(data, w, h, u, v);
+  const sx=Math.min(w-1,Math.max(0,Math.floor(u*w)));
+  const sy=Math.min(h-1,Math.max(0,Math.floor(v*h)));
+  const si=(sy*w+sx)*4;
+  return [data[si],data[si+1],data[si+2],data[si+3]];
+}
+
+/* ---------- bake: colour only (no lighting) ---------- */
+function bakeColourOnly(planes, textures){
   const W0=OUTPUT.width, H0=OUTPUT.height;
   const W=Math.max(1,Math.round(W0*SUPERSAMPLE));
   const H=Math.max(1,Math.round(H0*SUPERSAMPLE));
@@ -363,56 +198,23 @@ function bakeLit(planes, textures, lights){
       const yaw = (x+0.5)*360/W - 180;
       const ray = dirFromYawPitch(yaw, pitch);
       const hit = intersectRayPlanes(ray, planes);
-      if(!hit) continue;
+      const di = (y*W + x)*4;
+
+      if(!hit){ D[di+3]=0; continue; }
 
       const tex = textures[hit.pl.id];
-      if (!tex) continue;
-      let [r,g,b,a] = sampleColor(tex, hit.u, hit.v);
-      if (a===0) continue;
+      if (!tex){ D[di+3]=0; continue; }
 
-      let Nw = hit.pl.N;
-      if (tex.normal){
-        const Nt = sampleNormal(tex, hit.u, hit.v);
-        Nw = normalize([
-          hit.pl.T[0]*Nt[0] + hit.pl.B[0]*Nt[1] + hit.pl.N[0]*Nt[2],
-          hit.pl.T[1]*Nt[0] + hit.pl.B[1]*Nt[1] + hit.pl.N[1]*Nt[2],
-          hit.pl.T[2]*Nt[0] + hit.pl.B[2]*Nt[1] + hit.pl.N[2]*Nt[2]
-        ]);
-      }else if (tex.bump){
-        const Nt = sampleBump(tex, hit.u, hit.v);
-        Nw = normalize([
-          hit.pl.T[0]*Nt[0] + hit.pl.B[0]*Nt[1] + hit.pl.N[0]*Nt[2],
-          hit.pl.T[1]*Nt[0] + hit.pl.B[1]*Nt[1] + hit.pl.N[1]*Nt[2],
-          hit.pl.T[2]*Nt[0] + hit.pl.B[2]*Nt[1] + hit.pl.N[2]*Nt[2]
-        ]);
-      }
-
-      let Lsum = AMBIENT, spec = 0.0;
-      for (const Lsrc of lights){
-        const vis = visibleFromLight(Lsrc, hit.P, planes, hit.pl);
-        if (vis <= 0) continue;
-        const contrib = spotContribution(Lsrc, hit.P, Nw) * vis;
-        if (contrib <= 0) continue;
-        Lsum += contrib;
-
-        if (SPECULAR > 0){
-          const Ldir = normalize(sub(Lsrc.pos, hit.P));
-          const R = reflect(mul(Ldir,-1), Nw);
-          const rv = Math.max(0, dot(R, hit.V));
-          spec += SPECULAR * Math.pow(rv, SHININESS) * contrib;
-        }
-      }
-      Lsum = Math.min(2.0, Lsum);
-
-      const di = (y*W + x)*4;
-      D[di  ] = Math.round(r * Lsum + 255 * spec);
-      D[di+1] = Math.round(g * Lsum + 255 * spec);
-      D[di+2] = Math.round(b * Lsum + 255 * spec);
+      const [r,g,b,a] = sampleColor(tex, hit.u, hit.v);
+      D[di  ] = r;
+      D[di+1] = g;
+      D[di+2] = b;
       D[di+3] = a;
     }
   }
 
   ctx.putImageData(img,0,0);
+
   if (SUPERSAMPLE!==1.0){
     const final=document.createElement('canvas');
     final.width=W0; final.height=H0;
@@ -424,16 +226,16 @@ function bakeLit(planes, textures, lights){
   return cvs;
 }
 
-/* Exporters (same as before) */
-function bakeGeneric(planes, pixelFn){
+/* ---------- optional exporters (normals/height for reference) ---------- */
+function bakeNormalWorld(planes){
   const W0=OUTPUT.width, H0=OUTPUT.height;
   const W=Math.max(1,Math.round(W0*SUPERSAMPLE));
   const H=Math.max(1,Math.round(H0*SUPERSAMPLE));
   const cvs=el('#bake'); cvs.width=W; cvs.height=H;
   const ctx=cvs.getContext('2d',{willReadFrequently:true});
-  ctx.clearRect(0,0,W,H);
   const img = ctx.getImageData(0,0,W,H);
   const D = img.data;
+
   for(let y=0;y<H;y++){
     const pitch = 90 - (y+0.5)*180/H;
     for(let x=0;x<W;x++){
@@ -441,9 +243,14 @@ function bakeGeneric(planes, pixelFn){
       const ray = dirFromYawPitch(yaw, pitch);
       const hit = intersectRayPlanes(ray, planes);
       const di = (y*W + x)*4;
+
       if(!hit){ D[di+3]=0; continue; }
-      const [r,g,b,a] = pixelFn(hit);
-      D[di  ]=r; D[di+1]=g; D[di+2]=b; D[di+3]=a;
+
+      const N = hit.pl.N;
+      D[di  ] = Math.round((N[0]*0.5 + 0.5)*255);
+      D[di+1] = Math.round((N[1]*0.5 + 0.5)*255);
+      D[di+2] = Math.round((N[2]*0.5 + 0.5)*255);
+      D[di+3] = 255;
     }
   }
   ctx.putImageData(img,0,0);
@@ -457,39 +264,30 @@ function bakeGeneric(planes, pixelFn){
   }
   return cvs;
 }
-function bakeColour(planes, textures){
-  return bakeGeneric(planes, (hit)=>{
-    const tex = textures[hit.pl.id]; if (!tex) return [0,0,0,0];
-    return sampleColor(tex, hit.u, hit.v);
-  });
-}
-function bakeNormal(planes, textures){
-  return bakeGeneric(planes, (hit)=>{
-    const Nw = hit.pl.N;
-    return [
-      Math.round((Nw[0]*0.5 + 0.5)*255),
-      Math.round((Nw[1]*0.5 + 0.5)*255),
-      Math.round((Nw[2]*0.5 + 0.5)*255),
-      255
-    ];
-  });
-}
-function bakeHeight(planes, textures){
-  return bakeGeneric(planes, (hit)=>{
-    const tex = textures[hit.pl.id]; if (!tex) return [128,128,128,255];
-    if (tex.bump){
-      const {data,w,h} = tex.bump;
-      const [r,g,b] = USE_BILINEAR ? sampleBilinear(data,w,h,hit.u,hit.v) : (()=>{
-        const sx=Math.min(w-1,Math.max(0,Math.floor(hit.u*w)));
-        const sy=Math.min(h-1,Math.max(0,Math.floor(hit.v*h)));
-        const si=(sy*w+sx)*4;
-        return [data[si],data[si+1],data[si+2]];
-      })();
-      const y = Math.round(0.299*r + 0.587*g + 0.114*b);
-      return [y,y,y,255];
-    }
-    return [128,128,128,255];
-  });
+
+function bakeFlatHeight(planes){
+  // simple 50% gray height everywhere; change if you keep per-wall height maps
+  const W0=OUTPUT.width, H0=OUTPUT.height;
+  const W=Math.max(1,Math.round(W0*SUPERSAMPLE));
+  const H=Math.max(1,Math.round(H0*SUPERSAMPLE));
+  const cvs=el('#bake'); cvs.width=W; cvs.height=H;
+  const ctx=cvs.getContext('2d',{willReadFrequently:true});
+  const img = ctx.getImageData(0,0,W,H);
+  const D = img.data;
+
+  for(let i=0;i<W*H;i++){
+    const di=i*4; D[di]=128; D[di+1]=128; D[di+2]=128; D[di+3]=255;
+  }
+  ctx.putImageData(img,0,0);
+  if (SUPERSAMPLE!==1.0){
+    const final=document.createElement('canvas');
+    final.width=W0; final.height=H0;
+    const fx=final.getContext('2d'); fx.imageSmoothingEnabled=true;
+    fx.drawImage(cvs,0,0,W,H,0,0,W0,H0);
+    cvs.width=W0; cvs.height=H0;
+    const gx=cvs.getContext('2d'); gx.drawImage(final,0,0);
+  }
+  return cvs;
 }
 
 /* ---------- IO helpers ---------- */
@@ -523,42 +321,29 @@ function startViewer(panoUrl){
   });
 }
 
-/* ---------- main + UI ---------- */
+/* ---------- main ---------- */
 let cachedBakeURL = null;
 (async function main(){
   try{
-    toast('Loading walls…');
+    toast('Loading wall textures…');
     const { planes, textures } = await listAndLoad();
-    toast('Baking lit panorama…');
-    const lights = buildDownlights(planes);
-    const litCanvas = bakeLit(planes, textures, lights);
-    cachedBakeURL = await canvasToBlobURL(litCanvas);
+    toast('Baking equirectangular (no lighting)…');
+    const colorCanvas = bakeColourOnly(planes, textures);
+    cachedBakeURL = await canvasToBlobURL(colorCanvas);
     startViewer(cachedBakeURL);
 
-    // Download buttons
+    // downloads
     document.getElementById('dlColor').onclick = async ()=>{
-      toast('Baking colour map…');
-      const c = bakeColour(planes, textures);
-      await downloadCanvas(c, 'gallery_zero_colour.png');
-      toast('Colour map saved');
+      await downloadCanvas(bakeColourOnly(planes, textures), 'gallery_zero_colour.png');
+      toast('Colour (EQ) saved');
     };
     document.getElementById('dlNormal').onclick = async ()=>{
-      toast('Baking normal map…');
-      const c = bakeNormal(planes, textures);
-      await downloadCanvas(c, 'gallery_zero_normal_world.png');
-      toast('Normal map saved');
+      await downloadCanvas(bakeNormalWorld(planes), 'gallery_zero_normal_world.png');
+      toast('Normal (EQ) saved');
     };
     document.getElementById('dlHeight').onclick = async ()=>{
-      toast('Baking height map…');
-      const c = bakeHeight(planes, textures);
-      await downloadCanvas(c, 'gallery_zero_height.png');
-      toast('Height map saved');
-    };
-    document.getElementById('dlLit').onclick = async ()=>{
-      toast('Saving lit panorama…');
-      const c = bakeLit(planes, textures, lights);
-      await downloadCanvas(c, 'gallery_zero_lit.png');
-      toast('Lit panorama saved');
+      await downloadCanvas(bakeFlatHeight(planes), 'gallery_zero_height.png');
+      toast('Height (EQ) saved');
     };
   }catch(err){
     console.error(err);
