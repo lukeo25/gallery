@@ -53,28 +53,27 @@ const SUPERSAMPLE = 1.25;
 const USE_BILINEAR = true;
 const BACKGROUND_RGBA = [255,255,255,255];
 
-/* ===== Lighting (WALL-WASHERS) =====
-   - 5 per wall
-   - Mounted at ceiling line where roof meets wall
-   - Aimed down the wall to the floor
-   - Spaced with end margins so corners aren't hot */
-const AMBIENT = 0.60;          // bright base fill so the room never goes dark
+/* ===== Lighting: 5 fixtures per wall, aimed to a band height ===== */
+const AMBIENT = 0.62;              // bright base fill
+
+// target band height (meters from floor) to light across each wall
+const WASH_BAND_Y_M = 1.45;
+
 const DOWNLIGHTS = {
   perWall: 5,
-  endMarginM: 0.60,            // keep lights away from corners by this many meters
-  offWallM: 0.06,              // how far the fixture sits out from the wall (toward room)
-  belowCeilingM: 0.03,         // just under the ceiling line (in meters)
-  coneAngleDeg: 72,            // fairly wide wall-wash
-  featherDeg: 22,              // soft edge
-  intensity: 2.3,              // brightness per light
-  range: 4.2,                  // reach: 3.0m to floor, plus a bit
-  tiltTowardWallDeg: 14        // aim slightly into the wall so it washes top-to-bottom
+  endMarginM: 0.80,                // keep away from corners
+  offWallM: 0.06,                  // fixture sits slightly off the wall (toward room)
+  belowCeilingM: 0.03,             // mount just below ceiling
+  coneAngleDeg: 48,                // tighter beam to hit the band
+  featherDeg: 18,                  // soft edge
+  intensity: 3.0,                  // brightness per light
+  range: 4.5                        // reach to floor
 };
 
 const SPECULAR = 0.10;
 const SHININESS = 28.0;
 
-const SHADOWS = false;         // set true if you want occlusion; turn intensity up a touch if it dims too much
+const SHADOWS = false;             // set true for occlusion if desired
 const SHADOW_EPS = 1e-3;
 
 /* Bump/Normal helpers (for lit pano; exporters ignore lighting) */
@@ -201,7 +200,7 @@ async function loadPlaneTextures(map, planes){
   return tex;
 }
 
-/* ---------- WALL-WASHERS: 5 per wall at ceiling line ---------- */
+/* ---------- WALL-WASHERS aimed at a band height ---------- */
 function buildDownlights(planes){
   const lights = [];
   const walls = planes.filter(p => p.id==="north" || p.id==="south" || p.id==="east" || p.id==="west");
@@ -210,35 +209,35 @@ function buildDownlights(planes){
   const feather = DOWNLIGHTS.featherDeg * D2R;
 
   for (const w of walls){
-    // Light along-axis spans full wall width minus end margins
-    const fullSpan = w.hu * 2;                         // meters
+    const fullSpan = w.hu * 2;
     const usable = Math.max(0, fullSpan - 2*DOWNLIGHTS.endMarginM);
     const start = -usable/2;
 
     for (let i=0;i<DOWNLIGHTS.perWall;i++){
-      const t = (i + 0.5) / DOWNLIGHTS.perWall;       // center each segment
+      const t = (i + 0.5) / DOWNLIGHTS.perWall;
       const along = start + usable * t;
 
-      // Position:
-      // - At ceiling line: use w.B (up) at +hv and then step down by belowCeilingM
-      // - A hair in front of the wall: move along -w.N by offWallM (toward room)
-      const nearCeiling = add(w.p, mul(w.B, w.hv));    // top edge center
+      // mount near the ceiling, slightly out from the wall
+      const nearCeiling = add(w.p, mul(w.B, w.hv));
       const downFromEdge = add(nearCeiling, mul(w.B, -DOWNLIGHTS.belowCeilingM));
       const offWall = add(downFromEdge, mul(w.N, -DOWNLIGHTS.offWallM));
-      const pos = add(offWall, mul(w.T, along));       // slide along wall axis
+      const pos = add(offWall, mul(w.T, along));
 
-      // Direction:
-      // - Mostly straight down toward the floor
-      // - Slight component toward wall so it "hugs" the surface top-to-bottom
-      const down = [0,-1,0];
-      const towardWall = mul(w.N, -1);
-      const a = Math.cos(DOWNLIGHTS.tiltTowardWallDeg*D2R);
-      const b = Math.sin(DOWNLIGHTS.tiltTowardWallDeg*D2R);
-      const dir = normalize(add(mul(down, a), mul(towardWall, b)));
+      // target a point on the wall at the desired band height
+      const clampY = Math.max(0.05, Math.min(ROOM.height - 0.05, WASH_BAND_Y_M));
+      // convert desired world Y to the plane-local v (B axis) offset from plane origin p (at +hh)
+      const worldY = clampY;
+      const targetLocal = [ w.p[0], worldY, w.p[2] ];
+      // translate along T by 'along'
+      const targetAlong = add(targetLocal, mul(w.T, along));
+      // nudge into the wall slightly to ensure hit
+      const target = add(targetAlong, mul(w.N, 1e-3));
+
+      const dir = normalize(sub(target, pos)); // light -> point
 
       lights.push({
         pos,
-        dir,                // light -> outward axis
+        dir,
         cone,
         feather,
         intensity: DOWNLIGHTS.intensity,
@@ -251,7 +250,6 @@ function buildDownlights(planes){
 
 /* ---------- lighting math ---------- */
 function spotContribution(light, P, N){
-  // Vector from light to point
   const LP = sub(P, light.pos);
   const dist = Math.hypot(LP[0],LP[1],LP[2]);
   if (dist <= 1e-6 || dist > light.range) return 0.0;
@@ -259,12 +257,10 @@ function spotContribution(light, P, N){
   const V = normalize(LP);             // light -> point (cone test)
   const L = normalize(mul(V, -1));     // point -> light (lambert)
 
-  // Cone
   const cosA = dot(V, normalize(light.dir));
   const angle = Math.acos(Math.max(-1, Math.min(1, cosA)));
   if (angle > light.cone) return 0.0;
 
-  // Feather (soft edge)
   const inner = Math.max(0, light.cone - light.feather);
   let spot = 1.0;
   if (angle > inner){
@@ -272,7 +268,6 @@ function spotContribution(light, P, N){
     spot = t*t*(3 - 2*t);
   }
 
-  // Lambert + distance falloff
   const lambert = Math.max(0, dot(N, L));
   const att = Math.max(0, 1.0 - (dist / light.range));
   const fall = att*att;
@@ -379,7 +374,6 @@ function bakeLit(planes, textures, lights){
       let [r,g,b,a] = sampleColor(tex, hit.u, hit.v);
       if (a===0) continue;
 
-      // world normal (respect optional normal/bump maps)
       let Nw = hit.pl.N;
       if (tex.normal){
         const Nt = sampleNormal(tex, hit.u, hit.v);
@@ -434,7 +428,7 @@ function bakeLit(planes, textures, lights){
   return cvs;
 }
 
-/* Exporters (unchanged from previous build) */
+/* Exporters */
 function bakeGeneric(planes, pixelFn){
   const W0=OUTPUT.width, H0=OUTPUT.height;
   const W=Math.max(1,Math.round(W0*SUPERSAMPLE));
