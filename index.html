@@ -49,25 +49,32 @@ const GLOBAL_YAW_DEG = 0;
 const SHIFT_Y_M = 0.0;
 
 const OUTPUT = { width: 4096, height: 2048 };   // equirect size
-const SUPERSAMPLE = 1.25;                       // 1..2 for crisper edges
+const SUPERSAMPLE = 1.25;
 const USE_BILINEAR = true;
 const BACKGROUND_RGBA = [255,255,255,255];
 
-/* Lighting (for lit pano only) */
-const AMBIENT = 0.55;
+/* ===== Lighting (WALL-WASHERS) =====
+   - 5 per wall
+   - Mounted at ceiling line where roof meets wall
+   - Aimed down the wall to the floor
+   - Spaced with end margins so corners aren't hot */
+const AMBIENT = 0.60;          // bright base fill so the room never goes dark
 const DOWNLIGHTS = {
   perWall: 5,
-  outFromWall: 0.10,
-  belowCeiling: 0.12,
-  coneAngleDeg: 60,
-  featherDeg: 22,
-  intensity: 2.0,
-  range: 7.5,
-  forwardTiltDeg: 6
+  endMarginM: 0.60,            // keep lights away from corners by this many meters
+  offWallM: 0.06,              // how far the fixture sits out from the wall (toward room)
+  belowCeilingM: 0.03,         // just under the ceiling line (in meters)
+  coneAngleDeg: 72,            // fairly wide wall-wash
+  featherDeg: 22,              // soft edge
+  intensity: 2.3,              // brightness per light
+  range: 4.2,                  // reach: 3.0m to floor, plus a bit
+  tiltTowardWallDeg: 14        // aim slightly into the wall so it washes top-to-bottom
 };
-const SPECULAR = 0.12;
-const SHININESS = 30.0;
-const SHADOWS = false;
+
+const SPECULAR = 0.10;
+const SHININESS = 28.0;
+
+const SHADOWS = false;         // set true if you want occlusion; turn intensity up a touch if it dims too much
 const SHADOW_EPS = 1e-3;
 
 /* Bump/Normal helpers (for lit pano; exporters ignore lighting) */
@@ -194,32 +201,46 @@ async function loadPlaneTextures(map, planes){
   return tex;
 }
 
-/* ---------- downlights (for lit pano) ---------- */
+/* ---------- WALL-WASHERS: 5 per wall at ceiling line ---------- */
 function buildDownlights(planes){
   const lights = [];
   const walls = planes.filter(p => p.id==="north" || p.id==="south" || p.id==="east" || p.id==="west");
+
   const cone = DOWNLIGHTS.coneAngleDeg * D2R;
+  const feather = DOWNLIGHTS.featherDeg * D2R;
 
   for (const w of walls){
-    const count = DOWNLIGHTS.perWall;
-    const usable = (w.hu*2)*0.92;
+    // Light along-axis spans full wall width minus end margins
+    const fullSpan = w.hu * 2;                         // meters
+    const usable = Math.max(0, fullSpan - 2*DOWNLIGHTS.endMarginM);
     const start = -usable/2;
 
-    for (let i=0;i<count;i++){
-      const t = (i+0.5)/count;
-      const along = start + usable*t;
+    for (let i=0;i<DOWNLIGHTS.perWall;i++){
+      const t = (i + 0.5) / DOWNLIGHTS.perWall;       // center each segment
+      const along = start + usable * t;
 
-      const nearTop = add(w.p, mul(w.B, w.hv - DOWNLIGHTS.belowCeiling));
-      const forward = add(nearTop, mul(w.N, -DOWNLIGHTS.outFromWall));
-      const pos = add(forward, mul(w.T, along));
+      // Position:
+      // - At ceiling line: use w.B (up) at +hv and then step down by belowCeilingM
+      // - A hair in front of the wall: move along -w.N by offWallM (toward room)
+      const nearCeiling = add(w.p, mul(w.B, w.hv));    // top edge center
+      const downFromEdge = add(nearCeiling, mul(w.B, -DOWNLIGHTS.belowCeilingM));
+      const offWall = add(downFromEdge, mul(w.N, -DOWNLIGHTS.offWallM));
+      const pos = add(offWall, mul(w.T, along));       // slide along wall axis
 
+      // Direction:
+      // - Mostly straight down toward the floor
+      // - Slight component toward wall so it "hugs" the surface top-to-bottom
       const down = [0,-1,0];
       const towardWall = mul(w.N, -1);
-      const dir = normalize(add(mul(down, Math.cos(DOWNLIGHTS.forwardTiltDeg*D2R)),
-                                mul(towardWall, Math.sin(DOWNLIGHTS.forwardTiltDeg*D2R))));
+      const a = Math.cos(DOWNLIGHTS.tiltTowardWallDeg*D2R);
+      const b = Math.sin(DOWNLIGHTS.tiltTowardWallDeg*D2R);
+      const dir = normalize(add(mul(down, a), mul(towardWall, b)));
 
-      lights.push({ pos, dir, cone,
-        feather: DOWNLIGHTS.featherDeg * D2R,
+      lights.push({
+        pos,
+        dir,                // light -> outward axis
+        cone,
+        feather,
         intensity: DOWNLIGHTS.intensity,
         range: DOWNLIGHTS.range
       });
@@ -227,7 +248,10 @@ function buildDownlights(planes){
   }
   return lights;
 }
+
+/* ---------- lighting math ---------- */
 function spotContribution(light, P, N){
+  // Vector from light to point
   const LP = sub(P, light.pos);
   const dist = Math.hypot(LP[0],LP[1],LP[2]);
   if (dist <= 1e-6 || dist > light.range) return 0.0;
@@ -235,10 +259,12 @@ function spotContribution(light, P, N){
   const V = normalize(LP);             // light -> point (cone test)
   const L = normalize(mul(V, -1));     // point -> light (lambert)
 
+  // Cone
   const cosA = dot(V, normalize(light.dir));
   const angle = Math.acos(Math.max(-1, Math.min(1, cosA)));
   if (angle > light.cone) return 0.0;
 
+  // Feather (soft edge)
   const inner = Math.max(0, light.cone - light.feather);
   let spot = 1.0;
   if (angle > inner){
@@ -246,11 +272,13 @@ function spotContribution(light, P, N){
     spot = t*t*(3 - 2*t);
   }
 
+  // Lambert + distance falloff
   const lambert = Math.max(0, dot(N, L));
   const att = Math.max(0, 1.0 - (dist / light.range));
   const fall = att*att;
   return light.intensity * lambert * spot * fall;
 }
+
 function visibleFromLight(light, P, planes, selfPlane){
   if (!SHADOWS) return 1.0;
   const LP = sub(P, light.pos);
@@ -261,7 +289,7 @@ function visibleFromLight(light, P, planes, selfPlane){
     const n_dot_d = dot(pl.N, d);
     if (Math.abs(n_dot_d) <= 1e-9) continue;
     const t = dot(pl.N, [pl.p[0]-light.pos[0], pl.p[1]-light.pos[1], pl.p[2]-light.pos[2]]) / n_dot_d;
-    if (t <= 1e-3 || t >= distLP - 1e-3) continue;
+    if (t <= SHADOW_EPS || t >= distLP - SHADOW_EPS) continue;
 
     const Hx = light.pos[0] + t*d[0];
     const Hy = light.pos[1] + t*d[1];
@@ -303,7 +331,7 @@ function sampleBump(tex, u, v){
   return normalize([ -BUMP_SCALE*dhdu, -BUMP_SCALE*dhdv, 1.0 ]);
 }
 
-/* ---------- RAYCAST (shared) ---------- */
+/* ---------- RAYCAST ---------- */
 function intersectRayPlanes(ray, planes){
   let bestT = Infinity, hit = null;
   for(const pl of planes){
@@ -326,87 +354,6 @@ function intersectRayPlanes(ray, planes){
 }
 
 /* ---------- BAKERS ---------- */
-// 1) Colour (unlit)
-function bakeColour(planes, textures){
-  return bakeGeneric(planes, (hit)=>{
-    const tex = textures[hit.pl.id]; if (!tex) return [0,0,0,0];
-    return sampleColor(tex, hit.u, hit.v);
-  });
-}
-// 2) Normal (world-space → RGB)
-function bakeNormal(planes, textures){
-  return bakeGeneric(planes, (hit)=>{
-    // base plane normal
-    let Nw = hit.pl.N;
-    // if you prefer tangent-space normals stitched, swap to sampleNormal and encode ((Nt*0.5+0.5)*255)
-    const rgb = [
-      Math.round((Nw[0]*0.5 + 0.5)*255),
-      Math.round((Nw[1]*0.5 + 0.5)*255),
-      Math.round((Nw[2]*0.5 + 0.5)*255),
-      255
-    ];
-    return rgb;
-  });
-}
-// 3) Height/Bump (grayscale from *_b.png; 128 mid-gray when absent)
-function bakeHeight(planes, textures){
-  return bakeGeneric(planes, (hit)=>{
-    const tex = textures[hit.pl.id]; if (!tex) return [128,128,128,255];
-    if (tex.bump){
-      // sample bump texel luma
-      const {data,w,h} = tex.bump;
-      const [r,g,b] = USE_BILINEAR ? sampleBilinear(data,w,h,hit.u,hit.v) : (()=>{
-        const sx=Math.min(w-1,Math.max(0,Math.floor(hit.u*w)));
-        const sy=Math.min(h-1,Math.max(0,Math.floor(hit.v*h)));
-        const si=(sy*w+sx)*4;
-        return [data[si],data[si+1],data[si+2]];
-      })();
-      const y = Math.round(0.299*r + 0.587*g + 0.114*b);
-      return [y,y,y,255];
-    }
-    return [128,128,128,255];
-  });
-}
-
-// Shared raster loop: calls pixelFn(hit) → [r,g,b,a]
-function bakeGeneric(planes, pixelFn){
-  const W0=OUTPUT.width, H0=OUTPUT.height;
-  const W=Math.max(1,Math.round(W0*SUPERSAMPLE));
-  const H=Math.max(1,Math.round(H0*SUPERSAMPLE));
-  const cvs=el('#bake'); cvs.width=W; cvs.height=H;
-  const ctx=cvs.getContext('2d',{willReadFrequently:true});
-
-  ctx.clearRect(0,0,W,H);
-  const img = ctx.getImageData(0,0,W,H);
-  const D = img.data;
-
-  for(let y=0;y<H;y++){
-    const pitch = 90 - (y+0.5)*180/H;
-    for(let x=0;x<W;x++){
-      const yaw = (x+0.5)*360/W - 180;
-      const ray = dirFromYawPitch(yaw, pitch);
-      const hit = intersectRayPlanes(ray, planes);
-      const di = (y*W + x)*4;
-      if(!hit){ D[di+3]=0; continue; }
-      const [r,g,b,a] = pixelFn(hit);
-      D[di  ]=r; D[di+1]=g; D[di+2]=b; D[di+3]=a;
-    }
-  }
-
-  // downscale from supersample
-  ctx.putImageData(img,0,0);
-  if (SUPERSAMPLE!==1.0){
-    const final=document.createElement('canvas');
-    final.width=W0; final.height=H0;
-    const fx=final.getContext('2d'); fx.imageSmoothingEnabled=true;
-    fx.drawImage(cvs,0,0,W,H,0,0,W0,H0);
-    cvs.width=W0; cvs.height=H0;
-    const gx=cvs.getContext('2d'); gx.drawImage(final,0,0);
-  }
-  return cvs;
-}
-
-/* Lit panorama (your viewer image) */
 function bakeLit(planes, textures, lights){
   const W0=OUTPUT.width, H0=OUTPUT.height;
   const W=Math.max(1,Math.round(W0*SUPERSAMPLE));
@@ -432,7 +379,7 @@ function bakeLit(planes, textures, lights){
       let [r,g,b,a] = sampleColor(tex, hit.u, hit.v);
       if (a===0) continue;
 
-      // world normal (respect optional normal/bump maps for lighting)
+      // world normal (respect optional normal/bump maps)
       let Nw = hit.pl.N;
       if (tex.normal){
         const Nt = sampleNormal(tex, hit.u, hit.v);
@@ -487,6 +434,74 @@ function bakeLit(planes, textures, lights){
   return cvs;
 }
 
+/* Exporters (unchanged from previous build) */
+function bakeGeneric(planes, pixelFn){
+  const W0=OUTPUT.width, H0=OUTPUT.height;
+  const W=Math.max(1,Math.round(W0*SUPERSAMPLE));
+  const H=Math.max(1,Math.round(H0*SUPERSAMPLE));
+  const cvs=el('#bake'); cvs.width=W; cvs.height=H;
+  const ctx=cvs.getContext('2d',{willReadFrequently:true});
+  ctx.clearRect(0,0,W,H);
+  const img = ctx.getImageData(0,0,W,H);
+  const D = img.data;
+  for(let y=0;y<H;y++){
+    const pitch = 90 - (y+0.5)*180/H;
+    for(let x=0;x<W;x++){
+      const yaw = (x+0.5)*360/W - 180;
+      const ray = dirFromYawPitch(yaw, pitch);
+      const hit = intersectRayPlanes(ray, planes);
+      const di = (y*W + x)*4;
+      if(!hit){ D[di+3]=0; continue; }
+      const [r,g,b,a] = pixelFn(hit);
+      D[di  ]=r; D[di+1]=g; D[di+2]=b; D[di+3]=a;
+    }
+  }
+  ctx.putImageData(img,0,0);
+  if (SUPERSAMPLE!==1.0){
+    const final=document.createElement('canvas');
+    final.width=W0; final.height=H0;
+    const fx=final.getContext('2d'); fx.imageSmoothingEnabled=true;
+    fx.drawImage(cvs,0,0,W,H,0,0,W0,H0);
+    cvs.width=W0; cvs.height=H0;
+    const gx=cvs.getContext('2d'); gx.drawImage(final,0,0);
+  }
+  return cvs;
+}
+function bakeColour(planes, textures){
+  return bakeGeneric(planes, (hit)=>{
+    const tex = textures[hit.pl.id]; if (!tex) return [0,0,0,0];
+    return sampleColor(tex, hit.u, hit.v);
+  });
+}
+function bakeNormal(planes, textures){
+  return bakeGeneric(planes, (hit)=>{
+    const Nw = hit.pl.N;
+    return [
+      Math.round((Nw[0]*0.5 + 0.5)*255),
+      Math.round((Nw[1]*0.5 + 0.5)*255),
+      Math.round((Nw[2]*0.5 + 0.5)*255),
+      255
+    ];
+  });
+}
+function bakeHeight(planes, textures){
+  return bakeGeneric(planes, (hit)=>{
+    const tex = textures[hit.pl.id]; if (!tex) return [128,128,128,255];
+    if (tex.bump){
+      const {data,w,h} = tex.bump;
+      const [r,g,b] = USE_BILINEAR ? sampleBilinear(data,w,h,hit.u,hit.v) : (()=>{
+        const sx=Math.min(w-1,Math.max(0,Math.floor(hit.u*w)));
+        const sy=Math.min(h-1,Math.max(0,Math.floor(hit.v*h)));
+        const si=(sy*w+sx)*4;
+        return [data[si],data[si+1],data[si+2]];
+      })();
+      const y = Math.round(0.299*r + 0.587*g + 0.114*b);
+      return [y,y,y,255];
+    }
+    return [128,128,128,255];
+  });
+}
+
 /* ---------- IO helpers ---------- */
 async function listAndLoad(){
   const files = await listPngs(WALLS_API);
@@ -530,26 +545,26 @@ let cachedBakeURL = null;
     cachedBakeURL = await canvasToBlobURL(litCanvas);
     startViewer(cachedBakeURL);
 
-    // Wire download buttons
-    el('#dlColor').onclick = async ()=>{
+    // Download buttons
+    document.getElementById('dlColor').onclick = async ()=>{
       toast('Baking colour map…');
       const c = bakeColour(planes, textures);
       await downloadCanvas(c, 'gallery_zero_colour.png');
       toast('Colour map saved');
     };
-    el('#dlNormal').onclick = async ()=>{
+    document.getElementById('dlNormal').onclick = async ()=>{
       toast('Baking normal map…');
       const c = bakeNormal(planes, textures);
       await downloadCanvas(c, 'gallery_zero_normal_world.png');
-      toast('Normal map saved (world-space RGB)');
+      toast('Normal map saved');
     };
-    el('#dlHeight').onclick = async ()=>{
+    document.getElementById('dlHeight').onclick = async ()=>{
       toast('Baking height map…');
       const c = bakeHeight(planes, textures);
       await downloadCanvas(c, 'gallery_zero_height.png');
       toast('Height map saved');
     };
-    el('#dlLit').onclick = async ()=>{
+    document.getElementById('dlLit').onclick = async ()=>{
       toast('Saving lit panorama…');
       const c = bakeLit(planes, textures, lights);
       await downloadCanvas(c, 'gallery_zero_lit.png');
