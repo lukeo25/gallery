@@ -53,27 +53,27 @@ const SUPERSAMPLE = 1.25;
 const USE_BILINEAR = true;
 const BACKGROUND_RGBA = [255,255,255,255];
 
-/* ===== Lighting: 5 fixtures per wall, aimed to a band height ===== */
-const AMBIENT = 0.62;              // bright base fill
+/* ===== Lighting: 9 fixtures per wall, aimed to a higher band ===== */
+const AMBIENT = 0.62;               // base fill
 
 // target band height (meters from floor) to light across each wall
-const WASH_BAND_Y_M = 1.45;
+const WASH_BAND_Y_M = 1.80;         // <- raise/lower this to move the lit band
 
 const DOWNLIGHTS = {
-  perWall: 5,
-  endMarginM: 0.80,                // keep away from corners
-  offWallM: 0.06,                  // fixture sits slightly off the wall (toward room)
-  belowCeilingM: 0.03,             // mount just below ceiling
-  coneAngleDeg: 48,                // tighter beam to hit the band
-  featherDeg: 18,                  // soft edge
-  intensity: 3.0,                  // brightness per light
-  range: 4.5                        // reach to floor
+  perWall: 9,                       // <- more fixtures per wall
+  endMarginM: 0.70,                 // keep away from corners
+  offWallM: 0.06,                   // fixture sits slightly off the wall (toward room)
+  belowCeilingM: 0.03,              // mount just below ceiling
+  coneAngleDeg: 52,                 // a bit wider to overlap evenly
+  featherDeg: 18,                   // soft edge
+  intensity: 2.9,                   // brightness per light
+  range: 4.8                        // reach to floor
 };
 
 const SPECULAR = 0.10;
 const SHININESS = 28.0;
 
-const SHADOWS = false;             // set true for occlusion if desired
+const SHADOWS = false;              // set true for occlusion if desired
 const SHADOW_EPS = 1e-3;
 
 /* Bump/Normal helpers (for lit pano; exporters ignore lighting) */
@@ -200,7 +200,7 @@ async function loadPlaneTextures(map, planes){
   return tex;
 }
 
-/* ---------- WALL-WASHERS aimed at a band height ---------- */
+/* ---------- WALL-WASHERS aimed at a higher band ---------- */
 function buildDownlights(planes){
   const lights = [];
   const walls = planes.filter(p => p.id==="north" || p.id==="south" || p.id==="east" || p.id==="west");
@@ -225,12 +225,8 @@ function buildDownlights(planes){
 
       // target a point on the wall at the desired band height
       const clampY = Math.max(0.05, Math.min(ROOM.height - 0.05, WASH_BAND_Y_M));
-      // convert desired world Y to the plane-local v (B axis) offset from plane origin p (at +hh)
-      const worldY = clampY;
-      const targetLocal = [ w.p[0], worldY, w.p[2] ];
-      // translate along T by 'along'
+      const targetLocal = [ w.p[0], clampY, w.p[2] ];
       const targetAlong = add(targetLocal, mul(w.T, along));
-      // nudge into the wall slightly to ensure hit
       const target = add(targetAlong, mul(w.N, 1e-3));
 
       const dir = normalize(sub(target, pos)); // light -> point
@@ -428,7 +424,7 @@ function bakeLit(planes, textures, lights){
   return cvs;
 }
 
-/* Exporters */
+/* Exporters (same as before) */
 function bakeGeneric(planes, pixelFn){
   const W0=OUTPUT.width, H0=OUTPUT.height;
   const W=Math.max(1,Math.round(W0*SUPERSAMPLE));
